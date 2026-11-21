@@ -717,26 +717,7 @@ impl VideoView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut items: Vec<AnyElement> = Vec::new();
-        items.push(Self::menu_item(
-            &format!("HUD{}", self.hud_size.menu_label()),
-            |view, _window, cx| {
-                view.hud_size = view.hud_size.next();
-                cx.notify();
-            },
-            cx,
-        ));
-        items.push(Self::menu_item(
-            if self.hud_top_right {
-                "移到右下"
-            } else {
-                "移到右上"
-            },
-            |view, _window, cx| {
-                view.hud_top_right = !view.hud_top_right;
-                cx.notify();
-            },
-            cx,
-        ));
+        // 常用窗口操作在前，HUD 设置次之，关闭放最后。
         items.push(Self::menu_item(
             if fullscreen { "退出全屏" } else { "全屏" },
             |_view, window, cx| {
@@ -763,6 +744,26 @@ impl VideoView {
             |view, window, cx| {
                 view.always_on_top = !view.always_on_top;
                 set_always_on_top(window, view.always_on_top);
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
+            &format!("HUD{}", self.hud_size.menu_label()),
+            |view, _window, cx| {
+                view.hud_size = view.hud_size.next();
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
+            if self.hud_top_right {
+                "移到右下"
+            } else {
+                "移到右上"
+            },
+            |view, _window, cx| {
+                view.hud_top_right = !view.hud_top_right;
                 cx.notify();
             },
             cx,
