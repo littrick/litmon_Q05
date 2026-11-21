@@ -182,8 +182,15 @@ fn io_loop(
 
     let mut buf = [0u8; 65];
     let mut last_write = Instant::now();
+    let mut last_mouse: Option<(u16, u16)> = None;
     while !stop.load(Ordering::Relaxed) {
         while let Ok(frame) = rx.try_recv() {
+            if frame.cmd == q05_proto::cmd::MOUSE_ABS && frame.payload.len() >= 4 {
+                last_mouse = Some((
+                    u16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+                    u16::from_le_bytes([frame.payload[2], frame.payload[3]]),
+                ));
+            }
             match device.write(&output_report(&frame)) {
                 Ok(_) => {
                     stats.sent.fetch_add(1, Ordering::Relaxed);
@@ -222,6 +229,13 @@ fn io_loop(
             }
         }
     }
+
+    // 退出前主动释放键鼠，避免窗口关闭/应用退出后目标端残留按键或拖拽。
+    let _ = device.write(&output_report(&Frame::keyboard_release()));
+    let (x, y) = last_mouse.unwrap_or((0, 0));
+    let _ = device.write(&output_report(&Frame::mouse_abs(
+        x, y, false, false, false, 0,
+    )));
 }
 
 #[cfg(test)]
