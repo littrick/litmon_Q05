@@ -1,10 +1,8 @@
-//! Q0.5 GPUI 界面与视频渲染。
+//! Q0.5 GPUI 界面、视频渲染与窗口内输入透传。
 //!
-//! 当前最小实现：主窗口显示 Q0.5 视频流，并在每帧释放旧 `RenderImage`
-//! 的 sprite atlas 条目（见 [`VideoView::render`]）。
-//!
-//! LF0 实测：每帧必须调用 `cx.drop_image(old, Some(window))`；
-//! 仅 drop `Arc<RenderImage>` 会导致 atlas 内存持续增长。
+//! - 视频：MF 帧 → `RenderImage`；每帧必须 `cx.drop_image(old, Some(window))`。
+//! - 输入：窗口内键鼠/滚轮 → HID usage/归一化坐标 → `413D:2107`。
+//! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；不做全局钩子。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,14 +11,22 @@ use anyhow::{Result, anyhow};
 use async_channel::Receiver;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, ImageSource, IntoElement, Render, RenderImage, Window, WindowBounds,
-    WindowOptions, div, img, px, size,
+    App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent, KeyUpEvent,
+    MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
+    RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds, WindowOptions, div,
+    img, px, size,
 };
 use gpui_platform::application;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
+use q05_hid::HidHandle;
+use q05_input::{
+    KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key, normalize_position,
+};
 use q05_video::{Frame, VideoError, VideoEvent};
 
-/// 视频视图。
+const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+
+/// 视频 + 输入视图。
 struct VideoView {
     latest: Option<Arc<RenderImage>>,
     retired: Vec<Arc<RenderImage>>,
@@ -33,10 +39,17 @@ struct VideoView {
     latency_max: Duration,
     width: u32,
     height: u32,
+    focus_handle: FocusHandle,
+    subscriptions: Vec<Subscription>,
+    hid: Option<HidHandle>,
+    keyboard: KeyboardState,
+    mouse: MouseState,
+    input_enabled: bool,
+    last_mouse_send: Instant,
 }
 
 impl VideoView {
-    fn new(rx: Receiver<VideoEvent>, cx: &mut Context<Self>) -> Self {
+    fn new(rx: Receiver<VideoEvent>, hid: Option<HidHandle>, cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let alive = this
@@ -52,10 +65,15 @@ impl VideoView {
         })
         .detach();
 
+        let input_enabled = hid.is_some();
         Self {
             latest: None,
             retired: Vec::new(),
-            status: "正在启动 Q0.5 视频…".to_string(),
+            status: if input_enabled {
+                "正在启动 Q0.5 视频…".to_string()
+            } else {
+                "视频启动中；未找到输入 HID".to_string()
+            },
             frames: 0,
             last_report: Instant::now(),
             last_frames: 0,
@@ -64,6 +82,13 @@ impl VideoView {
             latency_max: Duration::ZERO,
             width: 0,
             height: 0,
+            focus_handle: cx.focus_handle(),
+            subscriptions: Vec::new(),
+            hid,
+            keyboard: KeyboardState::new(),
+            mouse: MouseState::new(),
+            input_enabled,
+            last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
         }
     }
 
@@ -94,7 +119,6 @@ impl VideoView {
         let image = Arc::new(RenderImage::new([ImageFrame::new(buffer)]));
         if let Some(old) = self.latest.replace(image) {
             self.retired.push(old);
-            // 保留一帧，等下一次 render 真正移除 atlas 条目。
             if self.retired.len() > 2 {
                 self.retired.remove(0);
             }
@@ -122,6 +146,7 @@ impl VideoView {
         } else {
             0.0
         };
+        let hid = self.hid.as_ref().map(HidHandle::stats).unwrap_or_default();
         tracing::info!(
             fps,
             frames = self.frames,
@@ -129,7 +154,11 @@ impl VideoView {
             max_latency_ms = self.latency_max.as_secs_f64() * 1000.0,
             width = self.width,
             height = self.height,
-            "ui video stats"
+            input_enabled = self.input_enabled,
+            hid_sent = hid.sent,
+            hid_acks = hid.acks,
+            hid_heartbeats = hid.heartbeats,
+            "ui stats"
         );
         self.last_report = now;
         self.last_frames = self.frames;
@@ -137,11 +166,169 @@ impl VideoView {
         self.latency_count = 0;
         self.latency_max = Duration::ZERO;
     }
+
+    fn send_frame(&self, frame: q05_hid::InputFrame) {
+        let Some(hid) = &self.hid else { return };
+        if let Err(err) = hid.send(frame) {
+            tracing::debug!(error = %err, "input send skipped");
+        }
+    }
+
+    fn release_all(&mut self) {
+        if let Some(frame) = self.keyboard.release_all() {
+            self.send_frame(frame);
+        }
+        let frame = self.mouse.release_buttons();
+        self.send_frame(frame);
+    }
+
+    fn update_mouse_position(&mut self, x: f32, y: f32, window: &Window) {
+        let size = window.viewport_size();
+        let (x, y) = normalize_position(x, y, f32::from(size.width), f32::from(size.height));
+        self.mouse.set_position(x, y);
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = to_modifiers(&event.keystroke.modifiers);
+        // 安全开关：Ctrl+Alt+Q。
+        if modifiers.control && modifiers.alt && event.keystroke.key.eq_ignore_ascii_case("q") {
+            self.input_enabled = !self.input_enabled && self.hid.is_some();
+            if self.input_enabled {
+                window.focus(&self.focus_handle, cx);
+                tracing::info!("input enabled");
+            } else {
+                self.release_all();
+                tracing::info!("input disabled");
+            }
+            return;
+        }
+        if !self.input_enabled || event.is_held {
+            return;
+        }
+        if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
+            if let Some(frame) = self.keyboard.key_down(usage, modifiers) {
+                self.send_frame(frame);
+            }
+        } else if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
+            self.send_frame(frame);
+        }
+    }
+
+    fn on_key_up(&mut self, event: &KeyUpEvent) {
+        if !self.input_enabled {
+            return;
+        }
+        let modifiers = to_modifiers(&event.keystroke.modifiers);
+        if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
+            if let Some(frame) = self.keyboard.key_up(usage, modifiers) {
+                self.send_frame(frame);
+            }
+        } else if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
+            self.send_frame(frame);
+        }
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &Window) {
+        if !self.input_enabled {
+            return;
+        }
+        self.update_mouse_position(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            window,
+        );
+        let now = Instant::now();
+        if now.duration_since(self.last_mouse_send) >= MOUSE_SEND_INTERVAL {
+            self.last_mouse_send = now;
+            let frame = self.mouse.frame(0);
+            self.send_frame(frame);
+        }
+    }
+
+    fn on_mouse_button(
+        &mut self,
+        button: GpuiMouseButton,
+        pressed: bool,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input_enabled {
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
+        self.update_mouse_position(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            window,
+        );
+        let Some(button) = to_mouse_button(button) else {
+            return;
+        };
+        if self.mouse.set_button(button, pressed) {
+            let frame = self.mouse.frame(0);
+            self.send_frame(frame);
+        }
+    }
+
+    fn on_mouse_up_button(
+        &mut self,
+        button: GpuiMouseButton,
+        event: &MouseUpEvent,
+        window: &Window,
+    ) {
+        if !self.input_enabled {
+            return;
+        }
+        self.update_mouse_position(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            window,
+        );
+        let Some(button) = to_mouse_button(button) else {
+            return;
+        };
+        if self.mouse.set_button(button, false) {
+            let frame = self.mouse.frame(0);
+            self.send_frame(frame);
+        }
+    }
+
+    fn on_scroll(&mut self, event: &ScrollEvent, window: &Window) {
+        if !self.input_enabled {
+            return;
+        }
+        self.update_mouse_position(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            window,
+        );
+        let dy = match event.delta {
+            ScrollDelta::Lines(point) => point.y,
+            ScrollDelta::Pixels(point) => f32::from(point.y) / 120.0,
+        };
+        let wheel = if dy > 0.0 {
+            1
+        } else if dy < 0.0 {
+            -1
+        } else {
+            0
+        };
+        if wheel != 0 {
+            let frame = self.mouse.frame(wheel);
+            self.send_frame(frame);
+        }
+    }
+}
+
+impl Drop for VideoView {
+    fn drop(&mut self) {
+        self.release_all();
+    }
 }
 
 impl Render for VideoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 关键：把上一帧从 sprite atlas 移除；只 drop Arc 不够。
         for old in self.retired.drain(..) {
             cx.drop_image(old, Some(window));
         }
@@ -162,14 +349,83 @@ impl Render for VideoView {
                 .into_any_element()
         };
 
-        div().size_full().bg(gpui::black()).child(content)
+        let focus_handle = self.focus_handle.clone();
+        div()
+            .track_focus(&focus_handle)
+            .size_full()
+            .bg(gpui::black())
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                view.on_key_down(event, window, cx)
+            }))
+            .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| view.on_key_up(event)))
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, _cx| {
+                view.on_mouse_move(event, window)
+            }))
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.on_mouse_button(GpuiMouseButton::Left, true, event, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                GpuiMouseButton::Right,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.on_mouse_button(GpuiMouseButton::Right, true, event, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                GpuiMouseButton::Middle,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.on_mouse_button(GpuiMouseButton::Middle, true, event, window, cx)
+                }),
+            )
+            .on_mouse_up(
+                GpuiMouseButton::Left,
+                cx.listener(|view, event: &MouseUpEvent, window, _cx| {
+                    view.on_mouse_up_button(GpuiMouseButton::Left, event, window)
+                }),
+            )
+            .on_mouse_up(
+                GpuiMouseButton::Right,
+                cx.listener(|view, event: &MouseUpEvent, window, _cx| {
+                    view.on_mouse_up_button(GpuiMouseButton::Right, event, window)
+                }),
+            )
+            .on_mouse_up(
+                GpuiMouseButton::Middle,
+                cx.listener(|view, event: &MouseUpEvent, window, _cx| {
+                    view.on_mouse_up_button(GpuiMouseButton::Middle, event, window)
+                }),
+            )
+            .on_scroll(
+                cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
+            )
+            .child(content)
     }
 }
 
-/// 打开主窗口并开始消费视频事件。
+fn to_modifiers(modifiers: &gpui::Modifiers) -> Modifiers {
+    Modifiers {
+        control: modifiers.control,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        platform: modifiers.platform,
+    }
+}
+
+fn to_mouse_button(button: GpuiMouseButton) -> Option<MouseButton> {
+    match button {
+        GpuiMouseButton::Left => Some(MouseButton::Left),
+        GpuiMouseButton::Right => Some(MouseButton::Right),
+        GpuiMouseButton::Middle => Some(MouseButton::Middle),
+        _ => None,
+    }
+}
+
+/// 打开主窗口并开始消费视频/输入事件。
 ///
-/// 该函数会阻塞直到应用退出。
-pub fn run(rx: Receiver<VideoEvent>) -> Result<()> {
+/// `hid` 为 None 时只显示视频，不注入输入。函数阻塞直到应用退出。
+pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
     application().run(move |cx: &mut App| {
@@ -179,7 +435,18 @@ pub fn run(rx: Receiver<VideoEvent>) -> Result<()> {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            move |_window, cx| cx.new(|cx| VideoView::new(rx, cx)),
+            move |window, cx| {
+                let view = cx.new(|cx| VideoView::new(rx, hid, cx));
+                let handle = view.read(cx).focus_handle.clone();
+                view.update(cx, |view, cx| {
+                    let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {
+                        view.release_all();
+                    });
+                    view.subscriptions.push(subscription);
+                });
+                window.focus(&handle, cx);
+                view
+            },
         ) {
             Ok(_) => {
                 cx.activate(true);

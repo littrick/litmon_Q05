@@ -3645,6 +3645,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "q05-hid",
  "q05-ui",
  "q05-video",
  "tracing",
@@ -3691,6 +3692,8 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "image",
+ "q05-hid",
+ "q05-input",
  "q05-video",
  "tracing",
 ]
