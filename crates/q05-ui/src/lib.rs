@@ -25,9 +25,16 @@ use q05_input::{
     normalize_position_in_rect,
 };
 use q05_session::{AudioStatus, DevicePresence};
-use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
+use q05_video::{Frame, ScreenState, VideoError, VideoEvent, VideoFormat};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+
+/// 窗口最小宽度（逻辑像素）。
+const MIN_WINDOW_WIDTH: f32 = 640.0;
+/// 窗口最小高度；按当前视频格式（1080p，16:9）的比例计算。
+/// 无视频时同样使用 16:9 回退。
+const MIN_WINDOW_HEIGHT: f32 =
+    MIN_WINDOW_WIDTH * VideoFormat::FHD30.height as f32 / VideoFormat::FHD30.width as f32;
 
 // ==================== 右下角状态方块（HUD）可调参数 ====================
 /// 背景色，格式 0xRRGGBBAA；当前为 50% 不透明黑色。
@@ -48,11 +55,11 @@ const HUD_MARGIN: f32 = 30.0;
 const HUD_RADIUS: f32 = 4.0;
 
 /// 右键菜单字号（逻辑像素）。
-const MENU_FONT_SIZE: f32 = 11.0;
+const MENU_FONT_SIZE: f32 = 10.0;
 /// 菜单文字行高系数。
 const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
 /// 菜单宽度系数。
-const MENU_LINE_WIDTH_FACTOR: f32 = 12.0;
+const MENU_LINE_WIDTH_FACTOR: f32 = 8.0;
 /// 单个菜单项的行高（逻辑像素）。
 const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
 /// 右键菜单宽度（逻辑像素，由字号推导）。
@@ -80,10 +87,11 @@ impl HudSize {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// 菜单里显示的动作文案（点击后切换到的尺寸）。
+    fn menu_label(self) -> &'static str {
         match self {
-            Self::Small => "小",
-            Self::Large => "大",
+            Self::Small => "放大",
+            Self::Large => "缩小",
         }
     }
 
@@ -709,15 +717,7 @@ impl VideoView {
     ) -> AnyElement {
         let mut items: Vec<AnyElement> = Vec::new();
         items.push(Self::menu_item(
-            if fullscreen { "退出全屏" } else { "全屏" },
-            |_view, window, cx| {
-                window.toggle_fullscreen();
-                cx.notify();
-            },
-            cx,
-        ));
-        items.push(Self::menu_item(
-            &format!("HUD 大小：{}", self.hud_size.label()),
+            &format!("HUD{}", self.hud_size.menu_label()),
             |view, _window, cx| {
                 view.hud_size = view.hud_size.next();
                 cx.notify();
@@ -726,12 +726,20 @@ impl VideoView {
         ));
         items.push(Self::menu_item(
             if self.hud_top_right {
-                "HUD 移到右下"
+                "移到右下"
             } else {
-                "HUD 移到右上"
+                "移到右上"
             },
             |view, _window, cx| {
                 view.hud_top_right = !view.hud_top_right;
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
+            if fullscreen { "退出全屏" } else { "全屏" },
+            |_view, window, cx| {
+                window.toggle_fullscreen();
                 cx.notify();
             },
             cx,
@@ -1052,6 +1060,7 @@ pub fn run(
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
                 ..Default::default()
             },
             move |window, cx| {
