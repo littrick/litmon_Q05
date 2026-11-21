@@ -28,6 +28,27 @@ use q05_session::DevicePresence;
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+
+// ==================== 右下角状态方块（HUD）可调参数 ====================
+/// 方块宽度（逻辑像素）。
+const HUD_WIDTH: f32 = 180.0;
+/// 方块高度（逻辑像素）。
+const HUD_HEIGHT: f32 = 180.0;
+/// 背景色，格式 0xRRGGBBAA；当前为 70% 不透明黑色。
+const HUD_BG_RGBA: u32 = 0x000000B3;
+/// 文字颜色，格式 0xRRGGBBAA。
+const HUD_TEXT_RGBA: u32 = 0xFFFFFFFF;
+/// 字号（逻辑像素）；12 约等于原来的 text_xs。
+const HUD_FONT_SIZE: f32 = 12.0;
+/// 行间距（逻辑像素）。
+const HUD_GAP: f32 = 1.0;
+/// 内边距（逻辑像素）。
+const HUD_PADDING: f32 = 6.0;
+/// 距窗口右边缘/下边缘的距离（逻辑像素）。
+const HUD_MARGIN: f32 = 8.0;
+/// 圆角（逻辑像素）。
+const HUD_RADIUS: f32 = 6.0;
+
 /// 右键菜单宽度（逻辑像素）。
 const MENU_WIDTH: f32 = 150.0;
 /// 右键菜单高度（逻辑像素）。
@@ -546,7 +567,7 @@ impl VideoView {
     }
 
     /// 右下角状态方块：分辨率、FPS、坐标与按键透传计数。
-    fn render_hud(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_hud(&self) -> AnyElement {
         let (x, y) = self.mouse.position();
         let resolution = if self.width > 0 && self.height > 0 {
             format!("{}×{}", self.width, self.height)
@@ -560,32 +581,25 @@ impl VideoView {
         };
         div()
             .absolute()
-            .right(px(8.0))
-            .bottom(px(8.0))
-            .w(px(180.0))
-            .h(px(180.0))
-            .rounded_md()
-            .bg(gpui::rgba(0x000000B3))
-            .text_color(gpui::white())
-            .text_xs()
-            .p(px(6.0))
+            .right(px(HUD_MARGIN))
+            .bottom(px(HUD_MARGIN))
+            .w(px(HUD_WIDTH))
+            .h(px(HUD_HEIGHT))
+            .rounded(px(HUD_RADIUS))
+            .bg(gpui::rgba(HUD_BG_RGBA))
+            .text_color(gpui::rgba(HUD_TEXT_RGBA))
+            .text_size(px(HUD_FONT_SIZE))
+            .p(px(HUD_PADDING))
             .flex()
             .flex_col()
             .justify_center()
-            .gap(px(1.0))
+            .gap(px(HUD_GAP))
             .child(format!("分辨率 {resolution}"))
             .child(format!("FPS {:.1}", self.fps))
             .child(format!("坐标 {x},{y}"))
             .child(format!("坐标事件 {}", self.move_passthroughs))
             .child(format!("左键 {left} · {}", self.left_passthroughs))
             .child("右键：菜单")
-            .on_mouse_down(
-                GpuiMouseButton::Right,
-                cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.open_context_menu(event, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
             .into_any_element()
     }
 
@@ -646,14 +660,7 @@ impl Render for VideoView {
         self.report();
 
         let content = if let Some(image) = &self.latest {
-            video_content(
-                self.video_rect(window),
-                image.clone(),
-                cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.open_context_menu(event, window, cx);
-                    cx.stop_propagation();
-                }),
-            )
+            video_content(self.video_rect(window), image.clone())
         } else {
             div()
                 .size_full()
@@ -703,7 +710,27 @@ impl Render for VideoView {
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.open_context_menu(event, window, cx)
+                    let size = window.viewport_size();
+                    let x = f32::from(event.position.x);
+                    let y = f32::from(event.position.y);
+                    let inside = hud_contains(x, y, f32::from(size.width), f32::from(size.height));
+                    tracing::info!(
+                        x,
+                        y,
+                        vw = f32::from(size.width),
+                        vh = f32::from(size.height),
+                        inside,
+                        "right click"
+                    );
+                    // 按几何区域判断，不依赖子元素命中：只有右下角方块弹本地菜单。
+                    if inside {
+                        view.open_context_menu(event, window, cx);
+                    } else if view.menu_open {
+                        view.menu_open = false;
+                        cx.notify();
+                    } else {
+                        view.on_mouse_button(GpuiMouseButton::Right, true, event, window, cx)
+                    }
                 }),
             )
             .on_mouse_down(
@@ -723,6 +750,12 @@ impl Render for VideoView {
                 }),
             )
             .on_mouse_up(
+                GpuiMouseButton::Right,
+                cx.listener(|view, event: &MouseUpEvent, window, _cx| {
+                    view.on_mouse_up_button(GpuiMouseButton::Right, event, window)
+                }),
+            )
+            .on_mouse_up(
                 GpuiMouseButton::Middle,
                 cx.listener(|view, event: &MouseUpEvent, window, _cx| {
                     view.on_mouse_up_button(GpuiMouseButton::Middle, event, window)
@@ -732,7 +765,7 @@ impl Render for VideoView {
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
             .child(content);
-        let hud = self.render_hud(cx);
+        let hud = self.render_hud();
         let menu = self.menu_open.then(|| {
             let size = window.viewport_size();
             self.render_menu(f32::from(size.width), f32::from(size.height), cx)
@@ -764,11 +797,7 @@ impl Render for VideoView {
 ///
 /// 不依赖 `Img` 自身的 `ObjectFit::Contain`：GPUI 的 `Img` 会写入内在宽高比，
 /// 在宽窗口下可能把元素撑得比窗口更高，导致实际绘制区域与鼠标映射不一致。
-fn video_content(
-    rect: ContentRect,
-    image: Arc<RenderImage>,
-    on_right_click: impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
+fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
     div()
         .absolute()
         .left(px(rect.x))
@@ -776,13 +805,19 @@ fn video_content(
         .w(px(rect.width.max(0.0)))
         .h(px(rect.height.max(0.0)))
         .overflow_hidden()
-        .on_mouse_down(GpuiMouseButton::Right, on_right_click)
         .child(
             img(ImageSource::Render(image))
                 .size_full()
                 .object_fit(ObjectFit::Fill),
         )
         .into_any_element()
+}
+
+/// 判断窗口坐标是否落在右下角状态方块内。
+fn hud_contains(x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> bool {
+    let left = viewport_w - HUD_MARGIN - HUD_WIDTH;
+    let top = viewport_h - HUD_MARGIN - HUD_HEIGHT;
+    x >= left && x <= left + HUD_WIDTH && y >= top && y <= top + HUD_HEIGHT
 }
 
 /// 把菜单左上角限制在窗口内，保证整块菜单可见。
@@ -955,6 +990,16 @@ mod tests {
         assert!(close(rect.y, 40.0));
         assert!(close(rect.width, 1280.0));
         assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn hud_hit_area_matches_bottom_right_block() {
+        // 2560x1440 全屏：HUD 位于 x 2372..2552、y 1252..1432。
+        assert!(hud_contains(2450.0, 1330.0, 2560.0, 1440.0));
+        assert!(!hud_contains(1280.0, 720.0, 2560.0, 1440.0));
+        assert!(!hud_contains(2370.0, 1330.0, 2560.0, 1440.0));
+        assert!(!hud_contains(2450.0, 1250.0, 2560.0, 1440.0));
+        assert!(hud_contains(2372.0, 1252.0, 2560.0, 1440.0));
     }
 
     #[test]
