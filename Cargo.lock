@@ -3850,6 +3850,7 @@ dependencies = [
  "async-channel",
  "q05-session",
  "q05-ui",
+ "resvg",
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2",
@@ -3914,7 +3915,9 @@ dependencies = [
  "q05-input",
  "q05-session",
  "q05-video",
+ "raw-window-handle",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -1064,6 +1064,9 @@ pub fn run(
                 ..Default::default()
             },
             move |window, cx| {
+                #[cfg(windows)]
+                apply_window_icon(window);
+
                 // 拦截系统关闭：直接 quit，阻止 GPUI 在窗口销毁后继续访问 HWND。
                 let quitting = quitting.clone();
                 window.on_window_should_close(cx, move |_window, cx| {
@@ -1098,6 +1101,70 @@ pub fn run(
     match open_error.lock().expect("open_error mutex").take() {
         Some(message) => Err(anyhow!(message)),
         None => Ok(()),
+    }
+}
+
+/// 显式设置窗口大/小图标，确保任务栏使用嵌入的 logo（资源 ID 1）。
+#[cfg(windows)]
+fn apply_window_icon(window: &Window) {
+    use raw_window_handle::RawWindowHandle;
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GCLP_HICON, GCLP_HICONSM, GetSystemMetrics, ICON_BIG, ICON_SMALL, ICON_SMALL2, IMAGE_ICON,
+        LR_DEFAULTCOLOR, LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW,
+        SetClassLongPtrW, WM_SETICON,
+    };
+
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(hwnd) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(hwnd.hwnd.get() as *mut core::ffi::c_void);
+
+    let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
+        return;
+    };
+    let hinstance = HINSTANCE(module.0);
+    let name = windows::core::PCWSTR(std::ptr::without_provenance(1));
+
+    let cx = unsafe { GetSystemMetrics(SM_CXICON) };
+    let cy = unsafe { GetSystemMetrics(SM_CYICON) };
+    let scx = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    let scy = unsafe { GetSystemMetrics(SM_CYSMICON) };
+
+    let big = unsafe { LoadImageW(Some(hinstance), name, IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR) };
+    if let Ok(big) = big {
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(big.0 as isize)),
+            );
+            SetClassLongPtrW(hwnd, GCLP_HICON, big.0 as isize);
+        }
+    }
+
+    let small = unsafe { LoadImageW(Some(hinstance), name, IMAGE_ICON, scx, scy, LR_DEFAULTCOLOR) };
+    if let Ok(small) = small {
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL as usize)),
+                Some(LPARAM(small.0 as isize)),
+            );
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL2 as usize)),
+                Some(LPARAM(small.0 as isize)),
+            );
+            SetClassLongPtrW(hwnd, GCLP_HICONSM, small.0 as isize);
+        }
     }
 }
 

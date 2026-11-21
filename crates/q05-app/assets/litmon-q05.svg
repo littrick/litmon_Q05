@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="screen" x1="128" y1="144" x2="384" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#64748B"/>
+      <stop offset="0.52" stop-color="#334155"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="bezel" x1="96" y1="116" x2="416" y2="332" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#CBD5E1"/>
+    </linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="220%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <clipPath id="screenClip">
+      <rect x="130" y="174" width="252" height="120" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <g filter="url(#shadow)" transform="translate(256 256) scale(1.36) translate(-256 -258)">
+    <!-- monitor -->
+    <rect x="88" y="132" width="336" height="204" rx="38" fill="url(#bezel)" stroke="#0B1220" stroke-width="5"/>
+    <rect x="110" y="154" width="292" height="160" rx="23" fill="url(#screen)"/>
+    <g clip-path="url(#screenClip)">
+      <path d="M150 276 255 190" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" opacity="0.16"/>
+    </g>
+
+    <!-- cursor: remote control -->
+    <path d="M226 184v96l27-27 21 42 25-12-21-42h42L226 184Z" fill="#FFFFFF"/>
+
+    <!-- stand -->
+    <path d="M226 336h60l15 32h-90l15-32Z" fill="#CBD5E1" stroke="#0B1220" stroke-width="5" stroke-linejoin="round"/>
+    <rect x="184" y="368" width="144" height="16" rx="8" fill="#CBD5E1" stroke="#0B1220" stroke-width="5"/>
+
+    <!-- live dot -->
+    <circle cx="366" cy="184" r="8" fill="#FFF8E7" opacity="0.9"/>
+  </g>
+</svg>
