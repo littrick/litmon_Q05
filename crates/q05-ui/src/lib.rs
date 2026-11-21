@@ -12,15 +12,16 @@ use async_channel::Receiver;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent, KeyUpEvent,
-    MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-    RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds, WindowOptions, div,
-    img, px, size,
+    MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds,
+    WindowOptions, div, img, px, size,
 };
 use gpui_platform::application;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use q05_hid::HidHandle;
 use q05_input::{
-    KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key, normalize_position,
+    KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
+    normalize_position_in_rect,
 };
 use q05_video::{Frame, VideoError, VideoEvent};
 
@@ -46,6 +47,8 @@ struct VideoView {
     mouse: MouseState,
     input_enabled: bool,
     last_mouse_send: Instant,
+    mouse_logged: bool,
+    log_all_mouse: bool,
 }
 
 impl VideoView {
@@ -89,6 +92,8 @@ impl VideoView {
             mouse: MouseState::new(),
             input_enabled,
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
+            mouse_logged: false,
+            log_all_mouse: std::env::var_os("Q05_MOUSE_LOG").is_some(),
         }
     }
 
@@ -192,8 +197,34 @@ impl VideoView {
 
     fn update_mouse_position(&mut self, x: f32, y: f32, window: &Window) {
         let size = window.viewport_size();
-        let (x, y) = normalize_position(x, y, f32::from(size.width), f32::from(size.height));
-        self.mouse.set_position(x, y);
+        let viewport_w = f32::from(size.width);
+        let viewport_h = f32::from(size.height);
+        let (video_w, video_h) = if self.width > 0 && self.height > 0 {
+            (self.width as f32, self.height as f32)
+        } else {
+            (1920.0, 1080.0)
+        };
+        let rect = content_rect(viewport_w, viewport_h, video_w, video_h);
+        let (nx, ny) = normalize_position_in_rect(x, y, rect.x, rect.y, rect.width, rect.height);
+        self.mouse.set_position(nx, ny);
+        if !self.mouse_logged || self.log_all_mouse {
+            self.mouse_logged = true;
+            tracing::info!(
+                local_x = x,
+                local_y = y,
+                viewport_w,
+                viewport_h,
+                video_w,
+                video_h,
+                rect_x = rect.x,
+                rect_y = rect.y,
+                rect_w = rect.width,
+                rect_h = rect.height,
+                norm_x = nx,
+                norm_y = ny,
+                "mouse mapping"
+            );
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -345,6 +376,7 @@ impl Render for VideoView {
         let content = if let Some(image) = &self.latest {
             img(ImageSource::Render(image.clone()))
                 .size_full()
+                .object_fit(ObjectFit::Contain)
                 .into_any_element()
         } else {
             div()
@@ -412,6 +444,58 @@ impl Render for VideoView {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContentRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// 计算 `ObjectFit::Contain` 下视频在窗口内的实际显示矩形。
+fn content_rect(viewport_w: f32, viewport_h: f32, video_w: f32, video_h: f32) -> ContentRect {
+    if !viewport_w.is_finite() || !viewport_h.is_finite() || viewport_w <= 0.0 || viewport_h <= 0.0
+    {
+        return ContentRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+    }
+    if !video_w.is_finite() || !video_h.is_finite() || video_w <= 0.0 || video_h <= 0.0 {
+        return ContentRect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport_w,
+            height: viewport_h,
+        };
+    }
+    let video_aspect = video_w / video_h;
+    let view_aspect = viewport_w / viewport_h;
+    if view_aspect > video_aspect {
+        // 左右黑边
+        let height = viewport_h;
+        let width = height * video_aspect;
+        ContentRect {
+            x: (viewport_w - width) / 2.0,
+            y: 0.0,
+            width,
+            height,
+        }
+    } else {
+        // 上下黑边
+        let width = viewport_w;
+        let height = width / video_aspect;
+        ContentRect {
+            x: 0.0,
+            y: (viewport_h - height) / 2.0,
+            width,
+            height,
+        }
+    }
+}
+
 fn to_modifiers(modifiers: &gpui::Modifiers) -> Modifiers {
     Modifiers {
         control: modifiers.control,
@@ -474,4 +558,40 @@ pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
 /// 方便应用层构造错误。
 pub fn video_error(err: VideoError) -> anyhow::Error {
     anyhow!("video: {err}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn content_rect_pillarbox() {
+        let rect = content_rect(1400.0, 720.0, 1920.0, 1080.0);
+        assert!(close(rect.x, 60.0));
+        assert!(close(rect.y, 0.0));
+        assert!(close(rect.width, 1280.0));
+        assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn content_rect_letterbox() {
+        let rect = content_rect(1280.0, 800.0, 1920.0, 1080.0);
+        assert!(close(rect.x, 0.0));
+        assert!(close(rect.y, 40.0));
+        assert!(close(rect.width, 1280.0));
+        assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn content_rect_exact_aspect() {
+        let rect = content_rect(1280.0, 720.0, 1920.0, 1080.0);
+        assert!(close(rect.x, 0.0));
+        assert!(close(rect.y, 0.0));
+        assert!(close(rect.width, 1280.0));
+        assert!(close(rect.height, 720.0));
+    }
 }

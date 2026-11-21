@@ -2,10 +2,13 @@
 //!
 //! LF0 目标机实测：
 //! - 键槽是 **HID usage**（0x04='a'，0x41=F8，Enter=0x28）；
-//! - 鼠标 x/y 是 **0..65535 归一化坐标**（32767,32767 ≈ 屏幕中心）；
+//! - 鼠标 x/y 的有效范围是 **0..32767（15-bit）**（16383/16384 ≈ 屏幕中心，32767 = 右下角）；
 //! - 修饰键位图是标准 HID 语义（0x01 LCTRL / 0x02 LSHIFT / 0x04 LALT / 0x08 LWIN）。
 
 use q05_proto::Frame;
+
+/// Q0.5 绝对坐标有效范围上限（目标端 HID 是 15-bit）。
+pub const ABS_MAX: u16 = 32767;
 
 /// 鼠标按键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,14 +145,38 @@ pub fn hid_usage_for_key(key: &str) -> Option<u8> {
     Some(usage)
 }
 
-/// 把窗口内坐标转成 Q0.5 的 0..65535 归一化坐标。
+/// 把窗口内坐标转成 Q0.5 的 0..32767 归一化坐标（内容区从 0,0 开始）。
 pub fn normalize_position(x: f32, y: f32, width: f32, height: f32) -> (u16, u16) {
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+    normalize_position_in_rect(x, y, 0.0, 0.0, width, height)
+}
+
+/// 把窗口内坐标转成 0..32767 归一化坐标，内容区可以带 letterbox 偏移。
+///
+/// Q0.5 视频用 `ObjectFit::Contain` 显示时，窗口内容区可能不是 16:9，
+/// 实际画面位于 `[rect_x, rect_x+rect_w] × [rect_y, rect_y+rect_h]`。
+pub fn normalize_position_in_rect(
+    x: f32,
+    y: f32,
+    rect_x: f32,
+    rect_y: f32,
+    rect_w: f32,
+    rect_h: f32,
+) -> (u16, u16) {
+    if !rect_w.is_finite()
+        || !rect_h.is_finite()
+        || !rect_x.is_finite()
+        || !rect_y.is_finite()
+        || rect_w <= 0.0
+        || rect_h <= 0.0
+    {
         return (0, 0);
     }
-    let nx = (x / width).clamp(0.0, 1.0);
-    let ny = (y / height).clamp(0.0, 1.0);
-    ((nx * 65535.0).round() as u16, (ny * 65535.0).round() as u16)
+    let nx = ((x - rect_x) / rect_w).clamp(0.0, 1.0);
+    let ny = ((y - rect_y) / rect_h).clamp(0.0, 1.0);
+    (
+        (nx * ABS_MAX as f32).round() as u16,
+        (ny * ABS_MAX as f32).round() as u16,
+    )
 }
 
 /// 键盘状态：最多 6 个同时按下的 HID usage + 修饰键位图。
@@ -337,13 +364,34 @@ mod tests {
         assert_eq!(normalize_position(0.0, 0.0, 1920.0, 1080.0), (0, 0));
         assert_eq!(
             normalize_position(960.0, 540.0, 1920.0, 1080.0),
-            (32768, 32768)
+            (16384, 16384)
         );
         assert_eq!(
             normalize_position(1920.0, 1080.0, 1920.0, 1080.0),
-            (65535, 65535)
+            (32767, 32767)
         );
-        assert_eq!(normalize_position(5000.0, -5.0, 1920.0, 1080.0), (65535, 0));
+        assert_eq!(normalize_position(5000.0, -5.0, 1920.0, 1080.0), (32767, 0));
+    }
+
+    #[test]
+    fn normalize_with_letterbox_offset() {
+        // 1280x710 内容区，视频 16:9 -> 上下各 5px 黑边，实际画面 1280x700。
+        let (x, y) = normalize_position_in_rect(640.0, 355.0, 0.0, 5.0, 1280.0, 700.0);
+        assert_eq!((x, y), (16384, 16384));
+        let (x, y) = normalize_position_in_rect(0.0, 5.0, 0.0, 5.0, 1280.0, 700.0);
+        assert_eq!((x, y), (0, 0));
+        // 黑边内的点被钳制到边缘。
+        let (_, y) = normalize_position_in_rect(640.0, 0.0, 0.0, 5.0, 1280.0, 700.0);
+        assert_eq!(y, 0);
+    }
+
+    #[test]
+    fn normalize_with_pillarbox_offset() {
+        // 1400x720 内容区，视频 16:9 -> 左右黑边，画面 1280x720，x 偏移 60。
+        let (x, y) = normalize_position_in_rect(700.0, 360.0, 60.0, 0.0, 1280.0, 720.0);
+        assert_eq!((x, y), (16384, 16384));
+        let (x, _) = normalize_position_in_rect(60.0, 360.0, 60.0, 0.0, 1280.0, 720.0);
+        assert_eq!(x, 0);
     }
 
     #[test]
@@ -388,12 +436,12 @@ mod tests {
     #[test]
     fn mouse_state_and_buttons() {
         let mut mouse = MouseState::new();
-        mouse.set_position(32768, 32768);
+        mouse.set_position(16384, 16384);
         assert!(mouse.set_button(MouseButton::Left, true));
         assert!(!mouse.set_button(MouseButton::Left, true));
         assert!(mouse.set_button(MouseButton::Right, true));
         let frame = mouse.frame(1);
-        assert_eq!(frame.payload, vec![0x00, 0x80, 0x00, 0x80, 1, 1, 0, 1]);
+        assert_eq!(frame.payload, vec![0x00, 0x40, 0x00, 0x40, 1, 1, 0, 1]);
         let release = mouse.release_buttons();
         assert_eq!(release.payload[4..7], [0, 0, 0]);
     }
