@@ -28,6 +28,10 @@ use q05_session::DevicePresence;
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+/// 右键菜单宽度（逻辑像素）。
+const MENU_WIDTH: f32 = 150.0;
+/// 右键菜单高度（逻辑像素）。
+const MENU_HEIGHT: f32 = 44.0;
 
 /// 视频 + 输入视图。
 struct VideoView {
@@ -40,6 +44,18 @@ struct VideoView {
     latency_sum: Duration,
     latency_count: u64,
     latency_max: Duration,
+    /// 最近一秒统计到的帧率。
+    fps: f64,
+    /// 已透传的坐标移动事件数。
+    move_passthroughs: u64,
+    /// 已透传的左键按下/释放事件数。
+    left_passthroughs: u64,
+    /// 右键菜单是否打开。
+    menu_open: bool,
+    /// 右键菜单位置（窗口逻辑坐标）。
+    menu_pos: (f32, f32),
+    /// 菜单关闭后的第一次左键释放不再透传。
+    suppress_left_up: bool,
     width: u32,
     height: u32,
     focus_handle: FocusHandle,
@@ -125,6 +141,12 @@ impl VideoView {
             latency_sum: Duration::ZERO,
             latency_count: 0,
             latency_max: Duration::ZERO,
+            fps: 0.0,
+            move_passthroughs: 0,
+            left_passthroughs: 0,
+            menu_open: false,
+            menu_pos: (8.0, 8.0),
+            suppress_left_up: false,
             width: 0,
             height: 0,
             focus_handle: cx.focus_handle(),
@@ -264,6 +286,7 @@ impl VideoView {
         }
         let dt = now.duration_since(self.last_report).as_secs_f64();
         let fps = (self.frames - self.last_frames) as f64 / dt;
+        self.fps = fps;
         let avg_latency = if self.latency_count > 0 {
             self.latency_sum.as_secs_f64() * 1000.0 / self.latency_count as f64
         } else {
@@ -354,6 +377,12 @@ impl VideoView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 菜单打开时 Esc 只关闭菜单，不透传给目标。
+        if self.menu_open && event.keystroke.key.eq_ignore_ascii_case("escape") {
+            self.menu_open = false;
+            cx.notify();
+            return;
+        }
         let modifiers = to_modifiers(&event.keystroke.modifiers);
         // 安全开关：Ctrl+Alt+Q。
         if modifiers.control && modifiers.alt && event.keystroke.key.eq_ignore_ascii_case("q") {
@@ -395,7 +424,7 @@ impl VideoView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &Window) {
-        if !self.input_enabled {
+        if !self.input_enabled || self.menu_open {
             return;
         }
         self.update_mouse_position(
@@ -408,6 +437,7 @@ impl VideoView {
             self.last_mouse_send = now;
             let frame = self.mouse.frame(0);
             self.send_frame(frame);
+            self.move_passthroughs += 1;
         }
     }
 
@@ -419,7 +449,7 @@ impl VideoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.input_enabled {
+        if !self.input_enabled || self.menu_open {
             return;
         }
         window.focus(&self.focus_handle, cx);
@@ -434,6 +464,9 @@ impl VideoView {
         if self.mouse.set_button(button, pressed) {
             let frame = self.mouse.frame(0);
             self.send_frame(frame);
+            if button == MouseButton::Left {
+                self.left_passthroughs += 1;
+            }
         }
     }
 
@@ -443,7 +476,7 @@ impl VideoView {
         event: &MouseUpEvent,
         window: &Window,
     ) {
-        if !self.input_enabled {
+        if !self.input_enabled || self.menu_open {
             return;
         }
         self.update_mouse_position(
@@ -457,11 +490,34 @@ impl VideoView {
         if self.mouse.set_button(button, false) {
             let frame = self.mouse.frame(0);
             self.send_frame(frame);
+            if button == MouseButton::Left {
+                self.left_passthroughs += 1;
+            }
         }
     }
 
+    /// 右键在窗口内任意位置打开本地菜单，不再透传给目标。
+    fn open_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let size = window.viewport_size();
+        let (x, y) = clamp_menu_pos(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            f32::from(size.width),
+            f32::from(size.height),
+        );
+        self.menu_open = true;
+        self.menu_pos = (x, y);
+        tracing::info!(x, y, "context menu opened");
+        cx.notify();
+    }
+
     fn on_scroll(&mut self, event: &ScrollEvent, window: &Window) {
-        if !self.input_enabled {
+        if !self.input_enabled || self.menu_open {
             return;
         }
         self.update_mouse_position(
@@ -484,6 +540,84 @@ impl VideoView {
             let frame = self.mouse.frame(wheel);
             self.send_frame(frame);
         }
+    }
+
+    /// 右下角状态方块：分辨率、FPS、坐标与按键透传计数。
+    fn render_hud(&self) -> AnyElement {
+        let (x, y) = self.mouse.position();
+        let resolution = if self.width > 0 && self.height > 0 {
+            format!("{}×{}", self.width, self.height)
+        } else {
+            "--".to_string()
+        };
+        let left = if self.mouse.is_pressed(MouseButton::Left) {
+            "按下"
+        } else {
+            "释放"
+        };
+        div()
+            .absolute()
+            .right(px(8.0))
+            .bottom(px(8.0))
+            .w(px(180.0))
+            .h(px(180.0))
+            .rounded_md()
+            .bg(gpui::rgba(0xC8C8C866))
+            .text_color(gpui::white())
+            .text_sm()
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(format!("分辨率 {resolution}"))
+            .child(format!("FPS {:.1}", self.fps))
+            .child(format!("坐标 {x},{y}"))
+            .child(format!("坐标事件 {}", self.move_passthroughs))
+            .child(format!("左键 {left} · {}", self.left_passthroughs))
+            .child("右键：菜单")
+            .into_any_element()
+    }
+
+    /// 右键下拉菜单。
+    fn render_menu(&self, viewport_w: f32, viewport_h: f32, cx: &mut Context<Self>) -> AnyElement {
+        let (x, y) = clamp_menu_pos(self.menu_pos.0, self.menu_pos.1, viewport_w, viewport_h);
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(MENU_WIDTH))
+            .rounded_md()
+            .bg(gpui::rgb(0x2A2A2A))
+            .border_1()
+            .border_color(gpui::rgb(0x666666))
+            .p(px(4.0))
+            .text_color(gpui::white())
+            .text_sm()
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
+                    // 点在菜单空白处：只消费事件，不透传给目标。
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(gpui::rgb(0x444444)))
+                    .on_mouse_down(
+                        GpuiMouseButton::Left,
+                        cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
+                            view.menu_open = false;
+                            cx.stop_propagation();
+                            cx.defer(|cx| cx.quit());
+                        }),
+                    )
+                    .child("关闭窗口"),
+            )
+            .into_any_element()
     }
 }
 
@@ -538,13 +672,20 @@ impl Render for VideoView {
             .on_mouse_down(
                 GpuiMouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    // 菜单打开时，左键只关闭菜单，不透传给目标。
+                    if view.menu_open {
+                        view.menu_open = false;
+                        view.suppress_left_up = true;
+                        cx.notify();
+                        return;
+                    }
                     view.on_mouse_button(GpuiMouseButton::Left, true, event, window, cx)
                 }),
             )
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.on_mouse_button(GpuiMouseButton::Right, true, event, window, cx)
+                    view.open_context_menu(event, window, cx)
                 }),
             )
             .on_mouse_down(
@@ -556,13 +697,11 @@ impl Render for VideoView {
             .on_mouse_up(
                 GpuiMouseButton::Left,
                 cx.listener(|view, event: &MouseUpEvent, window, _cx| {
+                    if view.suppress_left_up {
+                        view.suppress_left_up = false;
+                        return;
+                    }
                     view.on_mouse_up_button(GpuiMouseButton::Left, event, window)
-                }),
-            )
-            .on_mouse_up(
-                GpuiMouseButton::Right,
-                cx.listener(|view, event: &MouseUpEvent, window, _cx| {
-                    view.on_mouse_up_button(GpuiMouseButton::Right, event, window)
                 }),
             )
             .on_mouse_up(
@@ -575,6 +714,11 @@ impl Render for VideoView {
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
             .child(content);
+        let hud = self.render_hud();
+        let menu = self.menu_open.then(|| {
+            let size = window.viewport_size();
+            self.render_menu(f32::from(size.width), f32::from(size.height), cx)
+        });
         if let Some(label) = overlay_label {
             root = root.child(
                 div()
@@ -589,6 +733,10 @@ impl Render for VideoView {
                     .text_sm()
                     .child(label),
             );
+        }
+        root = root.child(hud);
+        if let Some(menu) = menu {
+            root = root.child(menu);
         }
         root
     }
@@ -612,6 +760,13 @@ fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
                 .object_fit(ObjectFit::Fill),
         )
         .into_any_element()
+}
+
+/// 把菜单左上角限制在窗口内，保证整块菜单可见。
+fn clamp_menu_pos(x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> (f32, f32) {
+    let max_x = (viewport_w - MENU_WIDTH - 8.0).max(8.0);
+    let max_y = (viewport_h - MENU_HEIGHT - 8.0).max(8.0);
+    (x.clamp(8.0, max_x), y.clamp(8.0, max_y))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -724,6 +879,7 @@ pub fn run(
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
                     let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {
+                        view.menu_open = false;
                         view.release_all();
                     });
                     view.subscriptions.push(subscription);
@@ -776,6 +932,13 @@ mod tests {
         assert!(close(rect.y, 40.0));
         assert!(close(rect.width, 1280.0));
         assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn menu_position_is_clamped_to_window() {
+        assert_eq!(clamp_menu_pos(300.0, 200.0, 1000.0, 800.0), (300.0, 200.0));
+        assert_eq!(clamp_menu_pos(990.0, 790.0, 1000.0, 800.0), (842.0, 748.0));
+        assert_eq!(clamp_menu_pos(0.0, 0.0, 100.0, 100.0), (8.0, 8.0));
     }
 
     #[test]

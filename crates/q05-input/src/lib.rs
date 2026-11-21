@@ -293,6 +293,15 @@ impl MouseState {
         self.y = y;
     }
 
+    /// 指定按键当前是否按下。
+    pub fn is_pressed(&self, button: MouseButton) -> bool {
+        match button {
+            MouseButton::Left => self.left,
+            MouseButton::Right => self.right,
+            MouseButton::Middle => self.middle,
+        }
+    }
+
     /// 设置按键状态；返回是否变化。
     pub fn set_button(&mut self, button: MouseButton, pressed: bool) -> bool {
         let slot = match button {
@@ -437,12 +446,16 @@ mod tests {
     fn mouse_state_and_buttons() {
         let mut mouse = MouseState::new();
         mouse.set_position(16384, 16384);
+        assert!(!mouse.is_pressed(MouseButton::Left));
         assert!(mouse.set_button(MouseButton::Left, true));
+        assert!(mouse.is_pressed(MouseButton::Left));
         assert!(!mouse.set_button(MouseButton::Left, true));
         assert!(mouse.set_button(MouseButton::Right, true));
         let frame = mouse.frame(1);
         assert_eq!(frame.payload, vec![0x00, 0x40, 0x00, 0x40, 1, 1, 0, 1]);
         let release = mouse.release_buttons();
         assert_eq!(release.payload[4..7], [0, 0, 0]);
+        assert!(!mouse.is_pressed(MouseButton::Left));
+        assert!(!mouse.is_pressed(MouseButton::Right));
     }
 }
