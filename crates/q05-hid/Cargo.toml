@@ -5,3 +5,8 @@ edition.workspace = true
 description = "Q0.5 输入 HID 传输（413D:2107）"
 
 [dependencies]
+async-channel = "2.5"
+hidapi = "2.6"
+q05-proto = { path = "../q05-proto" }
+thiserror = "2"
+tracing = "0.1"
