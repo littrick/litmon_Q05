@@ -51,9 +51,13 @@ const MENU_FONT_SIZE: f32 = 12.0;
 const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
 /// 菜单宽度系数。
 const MENU_LINE_WIDTH_FACTOR: f32 = 12.0;
-/// 菜单高度：与文字行高一致，同时用于贴边钳制。
-const MENU_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
-/// 右键菜单宽度：与文字行高相关
+/// 单个菜单项的行高（逻辑像素）。
+const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
+/// 菜单项数量：全屏/退出全屏、关闭窗口。
+const MENU_ITEM_COUNT: f32 = 2.0;
+/// 菜单高度 = 菜单项数 × 单个菜单项行高，同时用于贴边钳制。
+const MENU_HEIGHT: f32 = MENU_LINE_HEIGHT * MENU_ITEM_COUNT;
+/// 右键菜单宽度（逻辑像素，由字号推导）。
 const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
 
 /// 视频 + 输入视图。
@@ -594,6 +598,11 @@ impl VideoView {
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    tracing::info!(
+                        x = f32::from(event.position.x),
+                        y = f32::from(event.position.y),
+                        "hud right click"
+                    );
                     view.open_context_menu(event, window, cx);
                     cx.stop_propagation();
                 }),
@@ -602,7 +611,13 @@ impl VideoView {
     }
 
     /// 右键下拉菜单。
-    fn render_menu(&self, viewport_w: f32, viewport_h: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_menu(
+        &self,
+        viewport_w: f32,
+        viewport_h: f32,
+        fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (x, y) = clamp_menu_pos(self.menu_pos.0, self.menu_pos.1, viewport_w, viewport_h);
         div()
             .absolute()
@@ -616,13 +631,30 @@ impl VideoView {
             .px(px(4.0))
             .text_color(gpui::white())
             .text_size(px(MENU_FONT_SIZE))
-            .line_height(px(MENU_HEIGHT))
+            .line_height(px(MENU_LINE_HEIGHT))
             .on_mouse_down(
                 GpuiMouseButton::Left,
                 cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
                     // 点在菜单空白处：只消费事件，不透传给目标。
                     cx.stop_propagation();
                 }),
+            )
+            .child(
+                div()
+                    .px(px(10.0))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(gpui::rgb(0x444444)))
+                    .on_mouse_down(
+                        GpuiMouseButton::Left,
+                        cx.listener(|view, _event: &MouseDownEvent, window, cx| {
+                            view.menu_open = false;
+                            cx.stop_propagation();
+                            window.toggle_fullscreen();
+                            cx.notify();
+                        }),
+                    )
+                    .child(if fullscreen { "退出全屏" } else { "全屏" }),
             )
             .child(
                 div()
@@ -708,6 +740,11 @@ impl Render for VideoView {
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    tracing::info!(
+                        x = f32::from(event.position.x),
+                        y = f32::from(event.position.y),
+                        "root right click"
+                    );
                     // 状态方块自己的右键监听会拦截并弹菜单；其余区域照常透传。
                     if view.menu_open {
                         view.menu_open = false;
@@ -752,7 +789,12 @@ impl Render for VideoView {
         let hud = self.render_hud(cx);
         let menu = self.menu_open.then(|| {
             let size = window.viewport_size();
-            self.render_menu(f32::from(size.width), f32::from(size.height), cx)
+            self.render_menu(
+                f32::from(size.width),
+                f32::from(size.height),
+                window.is_fullscreen(),
+                cx,
+            )
         });
         if let Some(label) = overlay_label {
             root = root.child(
@@ -974,7 +1016,7 @@ mod tests {
         assert_eq!(clamp_menu_pos(300.0, 200.0, 1000.0, 800.0), (300.0, 200.0));
         assert_eq!(
             clamp_menu_pos(990.0, 790.0, 1000.0, 800.0),
-            (842.0, 800.0 - MENU_HEIGHT - 8.0)
+            (1000.0 - MENU_WIDTH - 8.0, 800.0 - MENU_HEIGHT - 8.0)
         );
         assert_eq!(clamp_menu_pos(0.0, 0.0, 100.0, 100.0), (8.0, 8.0));
     }
