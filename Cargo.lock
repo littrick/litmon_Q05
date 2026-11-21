@@ -3671,6 +3671,7 @@ name = "q05-input"
 version = "0.1.0"
 dependencies = [
  "q05-proto",
+ "tracing",
 ]
 
 [[package]]

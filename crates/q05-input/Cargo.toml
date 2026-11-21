@@ -6,3 +6,4 @@ description = "Q0.5 输入状态机、HID usage/坐标映射"
 
 [dependencies]
 q05-proto = { path = "../q05-proto" }
+tracing = "0.1"
