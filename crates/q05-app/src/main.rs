@@ -13,7 +13,15 @@ fn main() -> Result<()> {
     let hid = match q05_hid::HidHandle::open() {
         Ok(hid) => Some(hid),
         Err(err) => {
-            tracing::warn!(error = %err, "Q0.5 input HID unavailable; video-only");
+            tracing::warn!(error = %err, "Q0.5 input HID unavailable; input disabled");
+            None
+        }
+    };
+
+    let audio = match q05_audio::AudioEngine::start() {
+        Ok(audio) => Some(audio),
+        Err(err) => {
+            tracing::warn!(error = %err, "Q0.5 audio unavailable; video/input only");
             None
         }
     };
@@ -22,6 +30,7 @@ fn main() -> Result<()> {
     let mut capture = q05_video::VideoCapture::start(q05_video::VideoFormat::FHD30, tx)?;
 
     let result = q05_ui::run(rx, hid);
+    drop(audio);
     capture.stop();
     result
 }

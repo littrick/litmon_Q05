@@ -5,3 +5,7 @@ edition.workspace = true
 description = "Q0.5 UAC 音频采集与本地播放（WASAPI）"
 
 [dependencies]
+cpal = "0.18.2"
+ringbuf = "0.6.0"
+thiserror = "2.0.21"
+tracing = "0.1.44"
