@@ -3848,11 +3848,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
- "q05-audio",
- "q05-hid",
  "q05-session",
  "q05-ui",
- "q05-video",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3895,6 +3892,9 @@ name = "q05-session"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "q05-audio",
+ "q05-hid",
+ "q05-video",
  "thiserror 2.0.21",
  "tracing",
  "windows 0.62.2",

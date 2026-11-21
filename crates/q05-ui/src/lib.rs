@@ -48,6 +48,7 @@ struct VideoView {
     keyboard: KeyboardState,
     mouse: MouseState,
     input_enabled: bool,
+    input_requested: bool,
     last_mouse_send: Instant,
     mouse_logged: bool,
     log_all_mouse: bool,
@@ -61,7 +62,7 @@ impl VideoView {
     fn new(
         rx: Receiver<VideoEvent>,
         presence_rx: Receiver<DevicePresence>,
-        hid: Option<HidHandle>,
+        hid_rx: Receiver<Option<HidHandle>>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -94,7 +95,22 @@ impl VideoView {
         })
         .detach();
 
-        let input_enabled = hid.is_some();
+        cx.spawn(async move |this, cx| {
+            while let Ok(hid) = hid_rx.recv().await {
+                let alive = this
+                    .update(cx, |view, cx| {
+                        view.handle_hid(hid);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let input_enabled = false;
         Self {
             latest: None,
             retired: Vec::new(),
@@ -113,10 +129,11 @@ impl VideoView {
             height: 0,
             focus_handle: cx.focus_handle(),
             subscriptions: Vec::new(),
-            hid,
+            hid: None,
             keyboard: KeyboardState::new(),
             mouse: MouseState::new(),
             input_enabled,
+            input_requested: true,
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
             mouse_logged: false,
             log_all_mouse: std::env::var_os("Q05_MOUSE_LOG").is_some(),
@@ -132,12 +149,11 @@ impl VideoView {
             VideoEvent::Frame(frame) => self.set_frame(frame),
             VideoEvent::Error(err) => {
                 tracing::error!(error = %err, "video capture error");
-                // 独占模式：没有画面就不注入输入，避免与 AweSun 等抢占。
-                self.release_all();
+                // 没有画面就不注入输入；HID 由 supervisor 在插拔时管理。
+                self.clear_frame();
                 self.input_enabled = false;
-                self.hid = None;
-                self.status =
-                    format!("视频错误：{err}\n请退出 AweSun 的 Q0.5 窗口/进程后重启；输入已停用");
+                self.screen_state = ScreenState::Live;
+                self.status = format!("视频错误：{err}\n请检查相机占用/设备连接");
             }
             VideoEvent::ScreenState(state) => {
                 self.screen_state = state;
@@ -145,10 +161,9 @@ impl VideoView {
             }
             VideoEvent::Stopped => {
                 tracing::info!("video capture stopped");
-                self.release_all();
+                self.clear_frame();
                 self.input_enabled = false;
-                self.hid = None;
-                self.status = "视频已停止；输入已停用".to_string();
+                self.status = "视频已停止，等待设备重新连接…".to_string();
             }
         }
     }
@@ -159,9 +174,11 @@ impl VideoView {
             self.presence_seen = true;
             self.device_present = connected;
             if !connected {
-                self.device_message = Some("Q0.5 设备未连接".to_string());
+                self.release_all();
                 self.input_enabled = false;
                 self.hid = None;
+                self.clear_frame();
+                self.device_message = Some("Q0.5 设备未连接".to_string());
             }
             tracing::info!(?presence, "device presence initial");
             return;
@@ -173,12 +190,40 @@ impl VideoView {
             self.release_all();
             self.input_enabled = false;
             self.hid = None;
-            self.device_message = Some("Q0.5 设备已断开".to_string());
+            self.clear_frame();
+            self.screen_state = ScreenState::Live;
+            self.device_message = Some("Q0.5 设备已断开，等待重新插入…".to_string());
             tracing::warn!(?presence, "device disconnected");
         } else if !was_connected && connected {
-            self.device_message = Some("Q0.5 已重新连接，请重启应用以恢复视频".to_string());
-            tracing::info!(?presence, "device reconnected");
+            self.device_message = None;
+            self.screen_state = ScreenState::Live;
+            self.status = "Q0.5 已重新连接，正在恢复视频…".to_string();
+            tracing::info!(?presence, "device reconnected; rebuilding media");
         }
+    }
+
+    fn handle_hid(&mut self, hid: Option<HidHandle>) {
+        match hid {
+            Some(hid) => {
+                self.hid = Some(hid);
+                self.input_enabled = self.input_requested;
+                tracing::info!(input_requested = self.input_requested, "input HID ready");
+            }
+            None => {
+                self.release_all();
+                self.hid = None;
+                self.input_enabled = false;
+                tracing::info!("input HID removed");
+            }
+        }
+    }
+
+    fn clear_frame(&mut self) {
+        if let Some(old) = self.latest.take() {
+            self.retired.push(old);
+        }
+        self.width = 0;
+        self.height = 0;
     }
 
     fn set_frame(&mut self, frame: Frame) {
@@ -201,6 +246,9 @@ impl VideoView {
         self.frames += 1;
         self.width = frame.width;
         self.height = frame.height;
+        if self.input_requested && self.hid.is_some() {
+            self.input_enabled = true;
+        }
         self.status = format!(
             "{}x{}  ·  捕获→UI {:.1} ms",
             frame.width,
@@ -294,7 +342,8 @@ impl VideoView {
         let modifiers = to_modifiers(&event.keystroke.modifiers);
         // 安全开关：Ctrl+Alt+Q。
         if modifiers.control && modifiers.alt && event.keystroke.key.eq_ignore_ascii_case("q") {
-            self.input_enabled = !self.input_enabled && self.hid.is_some();
+            self.input_requested = !self.input_requested;
+            self.input_enabled = self.input_requested && self.hid.is_some();
             if self.input_enabled {
                 window.focus(&self.focus_handle, cx);
                 tracing::info!("input enabled");
@@ -609,7 +658,7 @@ fn to_mouse_button(button: GpuiMouseButton) -> Option<MouseButton> {
 pub fn run(
     rx: Receiver<VideoEvent>,
     presence_rx: Receiver<DevicePresence>,
-    hid: Option<HidHandle>,
+    hid_rx: Receiver<Option<HidHandle>>,
 ) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
@@ -639,7 +688,7 @@ pub fn run(
                     false
                 });
 
-                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid, cx));
+                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid_rx, cx));
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
                     let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {

@@ -5,8 +5,12 @@
 //! - `USB\VID_413D&PID_2107`：输入 HID。
 
 #[cfg(windows)]
+mod media;
+#[cfg(windows)]
 mod presence;
 
+#[cfg(windows)]
+pub use media::MediaSupervisor;
 #[cfg(windows)]
 pub use presence::{DeviceError, DeviceMonitor, DevicePresence, query_presence};
 

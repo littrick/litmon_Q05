@@ -6,6 +6,9 @@ description = "Q0.5 会话编排、生命周期、配置、指标"
 
 [dependencies]
 async-channel = "2.5"
+q05-audio = { path = "../q05-audio" }
+q05-hid = { path = "../q05-hid" }
+q05-video = { path = "../q05-video" }
 thiserror = "2"
 tracing = "0.1"
 

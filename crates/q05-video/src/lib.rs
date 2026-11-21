@@ -199,6 +199,13 @@ impl VideoCapture {
         self.stats.snapshot()
     }
 
+    /// 采集线程是否已经退出（错误、设备拔出或 stop）。
+    pub fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
     /// 请求停止并等待采集线程退出。
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

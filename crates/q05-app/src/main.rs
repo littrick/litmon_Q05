@@ -1,7 +1,7 @@
 //! litmon-q05 主程序入口。
 //!
-//! 当前闭环：Q0.5 MF 视频采集 → GPUI 显示；窗口内键鼠/滚轮 → 413D:2107。
-//! 音频与会话管理将在后续 LF 接入。
+//! 媒体流由 `q05-session::MediaSupervisor` 管理：设备在线时启动视频/HID/音频，
+//! 拔出后停止，重新插入后自动重建。UI 只消费持续的视频/输入/状态通道。
 
 use anyhow::Result;
 
@@ -10,37 +10,13 @@ fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let hid = match q05_hid::HidHandle::open() {
-        Ok(hid) => Some(hid),
-        Err(err) => {
-            tracing::warn!(error = %err, "Q0.5 input HID unavailable; input disabled");
-            None
-        }
-    };
-
-    let audio = match q05_audio::AudioEngine::start() {
-        Ok(audio) => Some(audio),
-        Err(err) => {
-            tracing::warn!(error = %err, "Q0.5 audio unavailable; video/input only");
-            None
-        }
-    };
-
+    let (video_tx, video_rx) = async_channel::bounded(2);
+    let (hid_tx, hid_rx) = async_channel::bounded(8);
     let (presence_tx, presence_rx) = async_channel::bounded(8);
-    let monitor = match q05_session::DeviceMonitor::start(presence_tx) {
-        Ok(monitor) => Some(monitor),
-        Err(err) => {
-            tracing::warn!(error = %err, "device presence monitor unavailable");
-            None
-        }
-    };
 
-    let (tx, rx) = async_channel::bounded(2);
-    let mut capture = q05_video::VideoCapture::start(q05_video::VideoFormat::FHD30, tx)?;
+    let mut supervisor = q05_session::MediaSupervisor::start(video_tx, hid_tx, presence_tx)?;
 
-    let result = q05_ui::run(rx, presence_rx, hid);
-    drop(monitor);
-    drop(audio);
-    capture.stop();
+    let result = q05_ui::run(video_rx, presence_rx, hid_rx);
+    supervisor.stop();
     result
 }
