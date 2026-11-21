@@ -53,12 +53,10 @@ const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
 const MENU_LINE_WIDTH_FACTOR: f32 = 12.0;
 /// 单个菜单项的行高（逻辑像素）。
 const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
-/// 菜单项数量：全屏/退出全屏、关闭窗口。
-const MENU_ITEM_COUNT: f32 = 2.0;
-/// 菜单高度 = 菜单项数 × 单个菜单项行高，同时用于贴边钳制。
-const MENU_HEIGHT: f32 = MENU_LINE_HEIGHT * MENU_ITEM_COUNT;
 /// 右键菜单宽度（逻辑像素，由字号推导）。
 const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
+/// 菜单距窗口边缘的最小距离（逻辑像素）。
+const MENU_MARGIN: f32 = 8.0;
 
 /// 视频 + 输入视图。
 struct VideoView {
@@ -526,23 +524,16 @@ impl VideoView {
         }
     }
 
-    /// 右键在窗口内任意位置打开本地菜单，不再透传给目标。
-    fn open_context_menu(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let size = window.viewport_size();
-        let (x, y) = clamp_menu_pos(
-            f32::from(event.position.x),
-            f32::from(event.position.y),
-            f32::from(size.width),
-            f32::from(size.height),
-        );
+    /// 在右下角状态方块上右键打开本地菜单。
+    fn open_context_menu(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        // 先记录点击位置，渲染时再按真实菜单高度钳制，避免增删菜单项后越界。
         self.menu_open = true;
-        self.menu_pos = (x, y);
-        tracing::info!(x, y, "context menu opened");
+        self.menu_pos = (f32::from(event.position.x), f32::from(event.position.y));
+        tracing::info!(
+            x = self.menu_pos.0,
+            y = self.menu_pos.1,
+            "context menu opened"
+        );
         cx.notify();
     }
 
@@ -597,20 +588,40 @@ impl VideoView {
             .child("右键：菜单")
             .on_mouse_down(
                 GpuiMouseButton::Right,
-                cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    tracing::info!(
-                        x = f32::from(event.position.x),
-                        y = f32::from(event.position.y),
-                        "hud right click"
-                    );
-                    view.open_context_menu(event, window, cx);
+                cx.listener(|view, event: &MouseDownEvent, _window, cx| {
+                    view.open_context_menu(event, cx);
                     cx.stop_propagation();
                 }),
             )
             .into_any_element()
     }
 
+    /// 单个菜单项。
+    fn menu_item(
+        label: &str,
+        on_select: impl Fn(&mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .px(px(10.0))
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|style| style.bg(gpui::rgb(0x444444)))
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                    view.menu_open = false;
+                    cx.stop_propagation();
+                    on_select(window, cx);
+                }),
+            )
+            .child(label.to_string())
+            .into_any_element()
+    }
+
     /// 右键下拉菜单。
+    ///
+    /// 高度由实际菜单项数计算，增删菜单项不需要再同步常量。
     fn render_menu(
         &self,
         viewport_w: f32,
@@ -618,12 +629,40 @@ impl VideoView {
         fullscreen: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (x, y) = clamp_menu_pos(self.menu_pos.0, self.menu_pos.1, viewport_w, viewport_h);
+        let mut items: Vec<AnyElement> = Vec::new();
+        items.push(Self::menu_item(
+            if fullscreen { "退出全屏" } else { "全屏" },
+            |window, cx| {
+                window.toggle_fullscreen();
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
+            "关闭窗口",
+            |_window, cx| cx.defer(|cx| cx.quit()),
+            cx,
+        ));
+
+        let full_height = MENU_LINE_HEIGHT * items.len() as f32;
+        let max_height = (viewport_h - MENU_MARGIN * 2.0).max(MENU_LINE_HEIGHT);
+        let menu_height = full_height.min(max_height);
+        let (x, y) = clamp_menu_pos(
+            self.menu_pos.0,
+            self.menu_pos.1,
+            viewport_w,
+            viewport_h,
+            menu_height,
+        );
         div()
+            .id("context-menu")
             .absolute()
             .left(px(x))
             .top(px(y))
             .w(px(MENU_WIDTH))
+            .max_h(px(max_height))
+            .overflow_y_scroll()
+            .whitespace_nowrap()
             .rounded_md()
             .bg(gpui::rgb(0x2A2A2A))
             .border_1()
@@ -639,39 +678,7 @@ impl VideoView {
                     cx.stop_propagation();
                 }),
             )
-            .child(
-                div()
-                    .px(px(10.0))
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(gpui::rgb(0x444444)))
-                    .on_mouse_down(
-                        GpuiMouseButton::Left,
-                        cx.listener(|view, _event: &MouseDownEvent, window, cx| {
-                            view.menu_open = false;
-                            cx.stop_propagation();
-                            window.toggle_fullscreen();
-                            cx.notify();
-                        }),
-                    )
-                    .child(if fullscreen { "退出全屏" } else { "全屏" }),
-            )
-            .child(
-                div()
-                    .px(px(10.0))
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(gpui::rgb(0x444444)))
-                    .on_mouse_down(
-                        GpuiMouseButton::Left,
-                        cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
-                            view.menu_open = false;
-                            cx.stop_propagation();
-                            cx.defer(|cx| cx.quit());
-                        }),
-                    )
-                    .child("关闭窗口"),
-            )
+            .children(items)
             .into_any_element()
     }
 }
@@ -740,11 +747,6 @@ impl Render for VideoView {
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    tracing::info!(
-                        x = f32::from(event.position.x),
-                        y = f32::from(event.position.y),
-                        "root right click"
-                    );
                     // 状态方块自己的右键监听会拦截并弹菜单；其余区域照常透传。
                     if view.menu_open {
                         view.menu_open = false;
@@ -840,10 +842,16 @@ fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
 }
 
 /// 把菜单左上角限制在窗口内，保证整块菜单可见。
-fn clamp_menu_pos(x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> (f32, f32) {
-    let max_x = (viewport_w - MENU_WIDTH - 8.0).max(8.0);
-    let max_y = (viewport_h - MENU_HEIGHT - 8.0).max(8.0);
-    (x.clamp(8.0, max_x), y.clamp(8.0, max_y))
+fn clamp_menu_pos(
+    x: f32,
+    y: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    menu_height: f32,
+) -> (f32, f32) {
+    let max_x = (viewport_w - MENU_WIDTH - MENU_MARGIN).max(MENU_MARGIN);
+    let max_y = (viewport_h - menu_height - MENU_MARGIN).max(MENU_MARGIN);
+    (x.clamp(MENU_MARGIN, max_x), y.clamp(MENU_MARGIN, max_y))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1013,12 +1021,25 @@ mod tests {
 
     #[test]
     fn menu_position_is_clamped_to_window() {
-        assert_eq!(clamp_menu_pos(300.0, 200.0, 1000.0, 800.0), (300.0, 200.0));
+        let two = MENU_LINE_HEIGHT * 2.0;
         assert_eq!(
-            clamp_menu_pos(990.0, 790.0, 1000.0, 800.0),
-            (1000.0 - MENU_WIDTH - 8.0, 800.0 - MENU_HEIGHT - 8.0)
+            clamp_menu_pos(300.0, 200.0, 1000.0, 800.0, two),
+            (300.0, 200.0)
         );
-        assert_eq!(clamp_menu_pos(0.0, 0.0, 100.0, 100.0), (8.0, 8.0));
+        assert_eq!(
+            clamp_menu_pos(990.0, 790.0, 1000.0, 800.0, two),
+            (1000.0 - MENU_WIDTH - MENU_MARGIN, 800.0 - two - MENU_MARGIN)
+        );
+        // 菜单项增加时，钳制高度随之变化，不会越界。
+        let five = MENU_LINE_HEIGHT * 5.0;
+        assert_eq!(
+            clamp_menu_pos(990.0, 790.0, 1000.0, 800.0, five).1,
+            800.0 - five - MENU_MARGIN
+        );
+        assert_eq!(
+            clamp_menu_pos(0.0, 0.0, 100.0, 100.0, two),
+            (MENU_MARGIN, MENU_MARGIN)
+        );
     }
 
     #[test]
