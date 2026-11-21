@@ -12,9 +12,9 @@ use anyhow::{Result, anyhow};
 use async_channel::Receiver;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent, KeyUpEvent,
-    MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds,
+    AnyElement, App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent,
+    KeyUpEvent, MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds,
     WindowOptions, div, img, px, size,
 };
 use gpui_platform::application;
@@ -306,16 +306,31 @@ impl VideoView {
         self.send_frame(frame);
     }
 
-    fn update_mouse_position(&mut self, x: f32, y: f32, window: &Window) {
-        let size = window.viewport_size();
-        let viewport_w = f32::from(size.width);
-        let viewport_h = f32::from(size.height);
+    /// 视频在窗口内的实际显示矩形。
+    ///
+    /// 鼠标映射与渲染共用同一份计算，避免 resize 后两者不一致。
+    fn video_rect(&self, window: &Window) -> ContentRect {
         let (video_w, video_h) = if self.width > 0 && self.height > 0 {
             (self.width as f32, self.height as f32)
         } else {
             (1920.0, 1080.0)
         };
-        let rect = content_rect(viewport_w, viewport_h, video_w, video_h);
+        self.content_rect_for(window, video_w, video_h)
+    }
+
+    fn content_rect_for(&self, window: &Window, video_w: f32, video_h: f32) -> ContentRect {
+        let size = window.viewport_size();
+        content_rect(
+            f32::from(size.width),
+            f32::from(size.height),
+            video_w,
+            video_h,
+        )
+    }
+
+    fn update_mouse_position(&mut self, x: f32, y: f32, window: &Window) {
+        let rect = self.video_rect(window);
+        let viewport = window.viewport_size();
         let (nx, ny) = normalize_position_in_rect(x, y, rect.x, rect.y, rect.width, rect.height);
         self.mouse.set_position(nx, ny);
         if !self.mouse_logged || self.log_all_mouse {
@@ -323,10 +338,10 @@ impl VideoView {
             tracing::info!(
                 local_x = x,
                 local_y = y,
-                viewport_w,
-                viewport_h,
-                video_w,
-                video_h,
+                viewport_w = f32::from(viewport.width),
+                viewport_h = f32::from(viewport.height),
+                video_w = self.width,
+                video_h = self.height,
                 rect_x = rect.x,
                 rect_y = rect.y,
                 rect_w = rect.width,
@@ -486,10 +501,7 @@ impl Render for VideoView {
         self.report();
 
         let content = if let Some(image) = &self.latest {
-            img(ImageSource::Render(image.clone()))
-                .size_full()
-                .object_fit(ObjectFit::Contain)
-                .into_any_element()
+            video_content(self.video_rect(window), image.clone())
         } else {
             div()
                 .size_full()
@@ -580,6 +592,26 @@ impl Render for VideoView {
         }
         root
     }
+}
+
+/// 按 `content_rect` 显式绘制视频。
+///
+/// 不依赖 `Img` 自身的 `ObjectFit::Contain`：GPUI 的 `Img` 会写入内在宽高比，
+/// 在宽窗口下可能把元素撑得比窗口更高，导致实际绘制区域与鼠标映射不一致。
+fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(rect.x))
+        .top(px(rect.y))
+        .w(px(rect.width.max(0.0)))
+        .h(px(rect.height.max(0.0)))
+        .overflow_hidden()
+        .child(
+            img(ImageSource::Render(image))
+                .size_full()
+                .object_fit(ObjectFit::Fill),
+        )
+        .into_any_element()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
