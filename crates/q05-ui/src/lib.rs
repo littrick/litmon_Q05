@@ -14,8 +14,8 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent, KeyUpEvent,
     MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds,
-    WindowOptions, div, img, px, size,
+    Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, img, px, size,
 };
 use gpui_platform::application;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
@@ -27,6 +27,7 @@ use q05_input::{
 use q05_video::{Frame, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
+const TITLEBAR_HEIGHT: f32 = 36.0;
 
 /// 视频 + 输入视图。
 struct VideoView {
@@ -50,6 +51,7 @@ struct VideoView {
     last_mouse_send: Instant,
     mouse_logged: bool,
     log_all_mouse: bool,
+    last_fps: f64,
 }
 
 impl VideoView {
@@ -95,6 +97,7 @@ impl VideoView {
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
             mouse_logged: false,
             log_all_mouse: std::env::var_os("Q05_MOUSE_LOG").is_some(),
+            last_fps: 0.0,
         }
     }
 
@@ -155,6 +158,7 @@ impl VideoView {
         }
         let dt = now.duration_since(self.last_report).as_secs_f64();
         let fps = (self.frames - self.last_frames) as f64 / dt;
+        self.last_fps = fps;
         let avg_latency = if self.latency_count > 0 {
             self.latency_sum.as_secs_f64() * 1000.0 / self.latency_count as f64
         } else {
@@ -200,13 +204,15 @@ impl VideoView {
         let size = window.viewport_size();
         let viewport_w = f32::from(size.width);
         let viewport_h = f32::from(size.height);
+        let video_area_h = (viewport_h - TITLEBAR_HEIGHT).max(1.0);
         let (video_w, video_h) = if self.width > 0 && self.height > 0 {
             (self.width as f32, self.height as f32)
         } else {
             (1920.0, 1080.0)
         };
-        let rect = content_rect(viewport_w, viewport_h, video_w, video_h);
-        let (nx, ny) = normalize_position_in_rect(x, y, rect.x, rect.y, rect.width, rect.height);
+        let rect = content_rect(viewport_w, video_area_h, video_w, video_h);
+        let rect_y = rect.y + TITLEBAR_HEIGHT;
+        let (nx, ny) = normalize_position_in_rect(x, y, rect.x, rect_y, rect.width, rect.height);
         self.mouse.set_position(nx, ny);
         if !self.mouse_logged || self.log_all_mouse {
             self.mouse_logged = true;
@@ -218,7 +224,7 @@ impl VideoView {
                 video_w,
                 video_h,
                 rect_x = rect.x,
-                rect_y = rect.y,
+                rect_y,
                 rect_w = rect.width,
                 rect_h = rect.height,
                 norm_x = nx,
@@ -269,7 +275,7 @@ impl VideoView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &Window) {
-        if !self.input_enabled {
+        if !self.input_enabled || f32::from(event.position.y) < TITLEBAR_HEIGHT {
             return;
         }
         self.update_mouse_position(
@@ -293,7 +299,7 @@ impl VideoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.input_enabled {
+        if !self.input_enabled || f32::from(event.position.y) < TITLEBAR_HEIGHT {
             return;
         }
         window.focus(&self.focus_handle, cx);
@@ -317,7 +323,7 @@ impl VideoView {
         event: &MouseUpEvent,
         window: &Window,
     ) {
-        if !self.input_enabled {
+        if !self.input_enabled || f32::from(event.position.y) < TITLEBAR_HEIGHT {
             return;
         }
         self.update_mouse_position(
@@ -335,7 +341,7 @@ impl VideoView {
     }
 
     fn on_scroll(&mut self, event: &ScrollEvent, window: &Window) {
-        if !self.input_enabled {
+        if !self.input_enabled || f32::from(event.position.y) < TITLEBAR_HEIGHT {
             return;
         }
         self.update_mouse_position(
@@ -361,6 +367,117 @@ impl VideoView {
     }
 }
 
+impl VideoView {
+    fn toggle_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input_enabled = !self.input_enabled && self.hid.is_some();
+        if self.input_enabled {
+            window.focus(&self.focus_handle, cx);
+            tracing::info!("input enabled (titlebar)");
+        } else {
+            self.release_all();
+            tracing::info!("input disabled (titlebar)");
+        }
+        cx.notify();
+    }
+
+    fn title_button(
+        label: &'static str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> gpui::AnyElement {
+        div()
+            .px(px(8.0))
+            .h(px(26.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .bg(gpui::rgb(0x2a2a2a))
+            .text_color(gpui::white())
+            .text_sm()
+            .cursor_pointer()
+            .child(label)
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(move |view, _event, window, cx| action(view, window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let status = if self.width > 0 {
+            format!(
+                "{}x{}  ·  {:.0} fps",
+                self.width, self.height, self.last_fps
+            )
+        } else {
+            "连接中".to_string()
+        };
+        let input_label = if self.input_enabled {
+            "输入：开"
+        } else {
+            "输入：关"
+        };
+
+        let drag = div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap_3()
+            .pl(px(12.0))
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(|_view, _event, window, _cx| {
+                    window.start_window_move();
+                }),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(gpui::white())
+                    .child("litmon-q05"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui::rgb(0xaaaaaa))
+                    .child(status),
+            );
+
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .pr(px(6.0))
+            .child(Self::title_button(input_label, cx, |view, window, cx| {
+                view.toggle_input(window, cx)
+            }))
+            .child(Self::title_button("—", cx, |_view, window, _cx| {
+                window.minimize_window()
+            }))
+            .child(Self::title_button("□", cx, |_view, window, _cx| {
+                window.zoom_window()
+            }))
+            .child(Self::title_button("×", cx, |view, _window, cx| {
+                view.release_all();
+                cx.quit();
+            }));
+
+        div()
+            .flex_none()
+            .w_full()
+            .h(px(TITLEBAR_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(gpui::rgb(0x1f1f1f))
+            .text_color(gpui::white())
+            .child(drag)
+            .child(controls)
+    }
+}
+
 impl Drop for VideoView {
     fn drop(&mut self) {
         self.release_all();
@@ -374,6 +491,7 @@ impl Render for VideoView {
         }
         self.report();
 
+        let titlebar = self.render_titlebar(cx);
         let content = if let Some(image) = &self.latest {
             img(ImageSource::Render(image.clone()))
                 .size_full()
@@ -394,6 +512,8 @@ impl Render for VideoView {
         div()
             .track_focus(&focus_handle)
             .size_full()
+            .flex()
+            .flex_col()
             .bg(gpui::black())
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 view.on_key_down(event, window, cx)
@@ -441,7 +561,8 @@ impl Render for VideoView {
             .on_scroll(
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
-            .child(content)
+            .child(titlebar)
+            .child(div().flex_1().w_full().child(content))
     }
 }
 
@@ -534,6 +655,11 @@ pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
         let bounds = Bounds::new(gpui::point(px(50.0), px(50.0)), size(px(1280.0), px(720.0)));
         match cx.open_window(
             WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("litmon-q05".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
