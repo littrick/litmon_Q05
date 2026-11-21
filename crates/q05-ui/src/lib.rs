@@ -383,6 +383,12 @@ impl VideoView {
             cx.notify();
             return;
         }
+        // F11 切换全屏，不透传给目标。
+        if event.keystroke.key.eq_ignore_ascii_case("f11") {
+            window.toggle_fullscreen();
+            cx.notify();
+            return;
+        }
         let modifiers = to_modifiers(&event.keystroke.modifiers);
         // 安全开关：Ctrl+Alt+Q。
         if modifiers.control && modifiers.alt && event.keystroke.key.eq_ignore_ascii_case("q") {
@@ -464,7 +470,7 @@ impl VideoView {
         if self.mouse.set_button(button, pressed) {
             let frame = self.mouse.frame(0);
             self.send_frame(frame);
-            if button == MouseButton::Left {
+            if button == MouseButton::Left && pressed {
                 self.left_passthroughs += 1;
             }
         }
@@ -490,9 +496,6 @@ impl VideoView {
         if self.mouse.set_button(button, false) {
             let frame = self.mouse.frame(0);
             self.send_frame(frame);
-            if button == MouseButton::Left {
-                self.left_passthroughs += 1;
-            }
         }
     }
 
@@ -543,7 +546,7 @@ impl VideoView {
     }
 
     /// 右下角状态方块：分辨率、FPS、坐标与按键透传计数。
-    fn render_hud(&self) -> AnyElement {
+    fn render_hud(&self, cx: &mut Context<Self>) -> AnyElement {
         let (x, y) = self.mouse.position();
         let resolution = if self.width > 0 && self.height > 0 {
             format!("{}×{}", self.width, self.height)
@@ -562,19 +565,27 @@ impl VideoView {
             .w(px(180.0))
             .h(px(180.0))
             .rounded_md()
-            .bg(gpui::rgba(0xC8C8C866))
+            .bg(gpui::rgba(0x000000B3))
             .text_color(gpui::white())
-            .text_sm()
-            .p(px(10.0))
+            .text_xs()
+            .p(px(6.0))
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .justify_center()
+            .gap(px(1.0))
             .child(format!("分辨率 {resolution}"))
             .child(format!("FPS {:.1}", self.fps))
             .child(format!("坐标 {x},{y}"))
             .child(format!("坐标事件 {}", self.move_passthroughs))
             .child(format!("左键 {left} · {}", self.left_passthroughs))
             .child("右键：菜单")
+            .on_mouse_down(
+                GpuiMouseButton::Right,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.open_context_menu(event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .into_any_element()
     }
 
@@ -635,7 +646,14 @@ impl Render for VideoView {
         self.report();
 
         let content = if let Some(image) = &self.latest {
-            video_content(self.video_rect(window), image.clone())
+            video_content(
+                self.video_rect(window),
+                image.clone(),
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.open_context_menu(event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
         } else {
             div()
                 .size_full()
@@ -714,7 +732,7 @@ impl Render for VideoView {
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
             .child(content);
-        let hud = self.render_hud();
+        let hud = self.render_hud(cx);
         let menu = self.menu_open.then(|| {
             let size = window.viewport_size();
             self.render_menu(f32::from(size.width), f32::from(size.height), cx)
@@ -746,7 +764,11 @@ impl Render for VideoView {
 ///
 /// 不依赖 `Img` 自身的 `ObjectFit::Contain`：GPUI 的 `Img` 会写入内在宽高比，
 /// 在宽窗口下可能把元素撑得比窗口更高，导致实际绘制区域与鼠标映射不一致。
-fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
+fn video_content(
+    rect: ContentRect,
+    image: Arc<RenderImage>,
+    on_right_click: impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
     div()
         .absolute()
         .left(px(rect.x))
@@ -754,6 +776,7 @@ fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
         .w(px(rect.width.max(0.0)))
         .h(px(rect.height.max(0.0)))
         .overflow_hidden()
+        .on_mouse_down(GpuiMouseButton::Right, on_right_click)
         .child(
             img(ImageSource::Render(image))
                 .size_full()
