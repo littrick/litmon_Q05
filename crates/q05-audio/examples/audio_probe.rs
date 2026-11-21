@@ -1,6 +1,6 @@
 //! 枚举 cpal 输入/输出设备与默认格式（只读，不打开流）。
 //!
-//! 运行：cargo run -p q05-audio --example probe
+//! 运行：cargo run -p q05-audio --example audio_probe
 
 use std::error::Error;
 

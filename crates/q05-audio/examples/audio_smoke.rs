@@ -1,6 +1,6 @@
 //! 真机冒烟：采集 Q0.5 音频并播放到默认输出，持续 10 秒。
 //!
-//! 运行：cargo run -p q05-audio --example smoke
+//! 运行：cargo run -p q05-audio --example audio_smoke
 
 use std::error::Error;
 use std::thread;

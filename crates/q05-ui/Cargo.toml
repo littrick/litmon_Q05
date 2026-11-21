@@ -12,5 +12,6 @@ gpui-pre-platform = "0.3.13"
 image = "0.25.10"
 q05-hid = { path = "../q05-hid" }
 q05-input = { path = "../q05-input" }
+q05-session = { path = "../q05-session" }
 q05-video = { path = "../q05-video" }
 tracing = "0.1"

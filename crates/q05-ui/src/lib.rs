@@ -24,6 +24,7 @@ use q05_input::{
     KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
     normalize_position_in_rect,
 };
+use q05_session::DevicePresence;
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
@@ -51,15 +52,38 @@ struct VideoView {
     mouse_logged: bool,
     log_all_mouse: bool,
     screen_state: ScreenState,
+    device_present: bool,
+    presence_seen: bool,
+    device_message: Option<String>,
 }
 
 impl VideoView {
-    fn new(rx: Receiver<VideoEvent>, hid: Option<HidHandle>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        rx: Receiver<VideoEvent>,
+        presence_rx: Receiver<DevicePresence>,
+        hid: Option<HidHandle>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let alive = this
                     .update(cx, |view, cx| {
                         view.handle_event(event);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            while let Ok(presence) = presence_rx.recv().await {
+                let alive = this
+                    .update(cx, |view, cx| {
+                        view.handle_presence(presence);
                         cx.notify();
                     })
                     .is_ok();
@@ -97,6 +121,9 @@ impl VideoView {
             mouse_logged: false,
             log_all_mouse: std::env::var_os("Q05_MOUSE_LOG").is_some(),
             screen_state: ScreenState::Live,
+            device_present: false,
+            presence_seen: false,
+            device_message: None,
         }
     }
 
@@ -123,6 +150,34 @@ impl VideoView {
                 self.hid = None;
                 self.status = "视频已停止；输入已停用".to_string();
             }
+        }
+    }
+
+    fn handle_presence(&mut self, presence: DevicePresence) {
+        let connected = presence.connected();
+        if !self.presence_seen {
+            self.presence_seen = true;
+            self.device_present = connected;
+            if !connected {
+                self.device_message = Some("Q0.5 设备未连接".to_string());
+                self.input_enabled = false;
+                self.hid = None;
+            }
+            tracing::info!(?presence, "device presence initial");
+            return;
+        }
+
+        let was_connected = self.device_present;
+        self.device_present = connected;
+        if was_connected && !connected {
+            self.release_all();
+            self.input_enabled = false;
+            self.hid = None;
+            self.device_message = Some("Q0.5 设备已断开".to_string());
+            tracing::warn!(?presence, "device disconnected");
+        } else if !was_connected && connected {
+            self.device_message = Some("Q0.5 已重新连接，请重启应用以恢复视频".to_string());
+            tracing::info!(?presence, "device reconnected");
         }
     }
 
@@ -398,11 +453,15 @@ impl Render for VideoView {
         };
 
         let focus_handle = self.focus_handle.clone();
-        let screen_label = match self.screen_state {
+        let screen_label: Option<&str> = match self.screen_state {
             ScreenState::Live => None,
             ScreenState::NoSignal => Some("目标屏幕无信号 / 已息屏"),
             ScreenState::Blank => Some("目标屏幕已息屏"),
         };
+        let overlay_label: Option<String> = self
+            .device_message
+            .clone()
+            .or_else(|| screen_label.map(str::to_string));
         let mut root = div()
             .track_focus(&focus_handle)
             .size_full()
@@ -455,7 +514,7 @@ impl Render for VideoView {
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
             .child(content);
-        if let Some(label) = screen_label {
+        if let Some(label) = overlay_label {
             root = root.child(
                 div()
                     .absolute()
@@ -547,7 +606,11 @@ fn to_mouse_button(button: GpuiMouseButton) -> Option<MouseButton> {
 /// 打开主窗口并开始消费视频/输入事件。
 ///
 /// `hid` 为 None 时只显示视频，不注入输入。函数阻塞直到应用退出。
-pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
+pub fn run(
+    rx: Receiver<VideoEvent>,
+    presence_rx: Receiver<DevicePresence>,
+    hid: Option<HidHandle>,
+) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
     let quitting = Arc::new(AtomicBool::new(false));
@@ -576,7 +639,7 @@ pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
                     false
                 });
 
-                let view = cx.new(|cx| VideoView::new(rx, hid, cx));
+                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid, cx));
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
                     let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {

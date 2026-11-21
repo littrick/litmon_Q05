@@ -13,6 +13,7 @@ anyhow = "1"
 async-channel = "2.5"
 q05-audio = { path = "../q05-audio" }
 q05-hid = { path = "../q05-hid" }
+q05-session = { path = "../q05-session" }
 q05-ui = { path = "../q05-ui" }
 q05-video = { path = "../q05-video" }
 tracing = "0.1"

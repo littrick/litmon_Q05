@@ -5,3 +5,11 @@ edition.workspace = true
 description = "Q0.5 会话编排、生命周期、配置、指标"
 
 [dependencies]
+async-channel = "2.5"
+thiserror = "2"
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+] }

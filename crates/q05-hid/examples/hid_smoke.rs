@@ -1,6 +1,6 @@
 //! 真机冒烟：打开 Q0.5 输入 HID，把目标光标移到屏幕中心并打印统计。
 //!
-//! 运行：cargo run -p q05-hid --example smoke
+//! 运行：cargo run -p q05-hid --example hid_smoke
 
 use std::error::Error;
 use std::thread;

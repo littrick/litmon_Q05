@@ -26,10 +26,20 @@ fn main() -> Result<()> {
         }
     };
 
+    let (presence_tx, presence_rx) = async_channel::bounded(8);
+    let monitor = match q05_session::DeviceMonitor::start(presence_tx) {
+        Ok(monitor) => Some(monitor),
+        Err(err) => {
+            tracing::warn!(error = %err, "device presence monitor unavailable");
+            None
+        }
+    };
+
     let (tx, rx) = async_channel::bounded(2);
     let mut capture = q05_video::VideoCapture::start(q05_video::VideoFormat::FHD30, tx)?;
 
-    let result = q05_ui::run(rx, hid);
+    let result = q05_ui::run(rx, presence_rx, hid);
+    drop(monitor);
     drop(audio);
     capture.stop();
     result
