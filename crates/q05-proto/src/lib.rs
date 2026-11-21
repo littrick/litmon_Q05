@@ -133,6 +133,9 @@ impl Frame {
     /// Decode the first frame found in `buf`.
     ///
     /// Stops at the first unescaped `BB`; anything after it is ignored.
+    ///
+    /// 注意：该函数按“第一个 `0xBB` 即结束”解析。目标机已确认 payload 可以包含
+    /// `0xBB`（例如坐标 `0x00BB`），这类帧请使用 [`Frame::decode_lenient`]。
     pub fn decode(buf: &[u8]) -> Result<Frame, FrameError> {
         let start = buf
             .iter()
@@ -141,10 +144,86 @@ impl Frame {
         decode_from(&buf[start + 1..])
     }
 
+    /// 长度感知解码：先反转义出 `len`，再按 `len + 1` 读取 body，最后校验 `0xBB`。
+    ///
+    /// 即使 payload 含 `0xBB` 也能正确解析；返回 `(frame, consumed)`，
+    /// `consumed` 从 `buf` 起始位置算起（含 `AA` 与 `BB`）。
+    pub fn decode_lenient(buf: &[u8]) -> Result<(Frame, usize), FrameError> {
+        let start = buf
+            .iter()
+            .position(|&b| b == START)
+            .ok_or(FrameError::NoStart)?;
+        let (frame, body_and_end) = decode_lenient_from(&buf[start + 1..])?;
+        Ok((frame, start + 1 + body_and_end))
+    }
+
     /// Decode without searching for `AA`; `buf` starts right after the start byte.
+    ///
+    /// 与 [`Frame::decode`] 一样按第一个 `0xBB` 结束；payload 可能含 `0xBB` 时请用
+    /// [`Frame::decode_lenient`]。
     pub fn decode_after_start(buf: &[u8]) -> Result<Frame, FrameError> {
         decode_from(buf)
     }
+}
+
+fn unescape_next(buf: &[u8], i: usize) -> Result<(u8, usize), FrameError> {
+    let b = *buf.get(i).ok_or(FrameError::NoEnd)?;
+    if b == ESC {
+        match buf.get(i + 1) {
+            Some(0x02) => Ok((START, i + 2)),
+            Some(0x01) => Ok((ESC, i + 2)),
+            _ => Err(FrameError::BadEscape),
+        }
+    } else {
+        Ok((b, i + 1))
+    }
+}
+
+/// 从 `AA` 之后开始解析；返回 `(frame, body+BB 的字节数)`。
+fn decode_lenient_from(buf: &[u8]) -> Result<(Frame, usize), FrameError> {
+    let mut raw = Vec::with_capacity(64);
+    let mut i = 0;
+
+    // 先读 len(u16 LE) 两个字节，才能知道 body 长度。
+    while raw.len() < 2 {
+        let (b, next) = unescape_next(buf, i)?;
+        raw.push(b);
+        i = next;
+    }
+    let len = u16::from_le_bytes([raw[0], raw[1]]) as usize;
+    // len 统计 field(2)+checksum(2)+cmd(1)+payload+BB(1)；
+    // raw body（不含 AA/BB）长度为 len + 1。
+    let body_len = len + 1;
+    if body_len < 7 {
+        return Err(FrameError::TooShort(body_len));
+    }
+    while raw.len() < body_len {
+        let (b, next) = unescape_next(buf, i)?;
+        raw.push(b);
+        i = next;
+    }
+    if buf.get(i) != Some(&END) {
+        return Err(FrameError::NoEnd);
+    }
+    i += 1;
+
+    let field = u16::from_le_bytes([raw[2], raw[3]]);
+    let declared_chk = u16::from_le_bytes([raw[4], raw[5]]);
+    let cmd = raw[6];
+    let payload = raw[7..].to_vec();
+    let frame = Frame {
+        field,
+        cmd,
+        payload,
+    };
+    let computed = frame.checksum();
+    if computed != declared_chk {
+        return Err(FrameError::BadChecksum {
+            declared: declared_chk,
+            computed,
+        });
+    }
+    Ok((frame, i))
 }
 
 fn decode_from(buf: &[u8]) -> Result<Frame, FrameError> {
@@ -425,23 +504,17 @@ pub fn describe_hex(input: &str) -> Result<Vec<String>, String> {
     }
     let mut out = Vec::new();
     let mut rest = &bytes[..];
-    while let Ok(frame) = Frame::decode(rest) {
-        out.push(describe(&frame));
-        let start = rest.iter().position(|&b| b == START).unwrap();
-        let after = &rest[start + 1..];
-        // find end of this frame to continue scanning
-        let mut i = 0;
-        while i < after.len() {
-            if after[i] == ESC {
-                i += 2;
-            } else if after[i] == END {
-                i += 1;
-                break;
-            } else {
-                i += 1;
+    while let Some(start) = rest.iter().position(|&b| b == START) {
+        match Frame::decode_lenient(&rest[start..]) {
+            Ok((frame, consumed)) => {
+                out.push(describe(&frame));
+                rest = &rest[start + consumed..];
+            }
+            Err(_) => {
+                // 跳过这个坏起点，继续找下一个 AA。
+                rest = &rest[start + 1..];
             }
         }
-        rest = &after[i..];
     }
     if out.is_empty() {
         Err("no decodable frame".into())
@@ -503,6 +576,57 @@ mod tests {
         let raw = hex_bytes("aa 0e 00 00 01 e9 01 02 64 00 c8 00 00 00 00 00 bb");
         let f = Frame::decode(&raw).unwrap();
         assert!(describe(&f).contains("x=100 y=200"));
+    }
+
+    #[test]
+    fn lenient_handshake_roundtrip() {
+        let f = Frame::new(cmd::HANDSHAKE, vec![]);
+        let enc = f.encode();
+        let (decoded, consumed) = Frame::decode_lenient(&enc).unwrap();
+        assert_eq!(decoded, f);
+        assert_eq!(consumed, enc.len());
+    }
+
+    #[test]
+    fn lenient_payload_containing_end_byte() {
+        // 目标机已确认 payload 可以包含 0xBB（例如坐标 0x00BB）。
+        let f = Frame::new(cmd::MOUSE_ABS, vec![0xBB, 0x00, 0xBB, 0x00, 0, 0, 0, 0]);
+        let enc = f.encode();
+        let (decoded, consumed) = Frame::decode_lenient(&enc).unwrap();
+        assert_eq!(decoded, f);
+        assert_eq!(consumed, enc.len());
+        assert!(Frame::decode(&enc).is_err(), "legacy decoder should fail");
+    }
+
+    #[test]
+    fn lenient_ignores_trailing_stale_bytes() {
+        let f = Frame::new(cmd::MOUSE_ABS, vec![100, 0, 200, 0, 0, 0, 0, 0]);
+        let mut buf = f.encode();
+        let frame_len = buf.len();
+        buf.extend_from_slice(&[0xBB, 0x00, 0x00, 0xAA, 0x55]);
+        let (decoded, consumed) = Frame::decode_lenient(&buf).unwrap();
+        assert_eq!(decoded, f);
+        assert_eq!(consumed, frame_len);
+    }
+
+    #[test]
+    fn lenient_decodes_multiple_frames() {
+        let a = Frame::new(cmd::HANDSHAKE, vec![]);
+        let b = Frame::new(cmd::MOUSE_ABS, vec![1, 0, 2, 0, 0, 0, 0, 0]);
+        let mut buf = a.encode();
+        buf.extend_from_slice(&b.encode());
+        let (first, consumed) = Frame::decode_lenient(&buf).unwrap();
+        assert_eq!(first, a);
+        let (second, consumed2) = Frame::decode_lenient(&buf[consumed..]).unwrap();
+        assert_eq!(second, b);
+        assert_eq!(consumed + consumed2, buf.len());
+    }
+
+    #[test]
+    fn lenient_rejects_truncated_frame() {
+        let f = Frame::new(cmd::MOUSE_ABS, vec![1, 0, 2, 0, 0, 0, 0, 0]);
+        let enc = f.encode();
+        assert!(Frame::decode_lenient(&enc[..enc.len() - 1]).is_err());
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
