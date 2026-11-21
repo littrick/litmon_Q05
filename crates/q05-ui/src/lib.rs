@@ -55,6 +55,8 @@ const MENU_LINE_WIDTH_FACTOR: f32 = 12.0;
 const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
 /// 右键菜单宽度（逻辑像素，由字号推导）。
 const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
+/// 菜单内边距（上下左右，逻辑像素）。
+const MENU_PADDING: f32 = 4.0;
 /// 菜单距窗口边缘的最小距离（逻辑像素）。
 const MENU_MARGIN: f32 = 8.0;
 
@@ -644,7 +646,7 @@ impl VideoView {
             cx,
         ));
 
-        let full_height = MENU_LINE_HEIGHT * items.len() as f32;
+        let full_height = menu_height(items.len());
         let max_height = (viewport_h - MENU_MARGIN * 2.0).max(MENU_LINE_HEIGHT);
         let menu_height = full_height.min(max_height);
         let (x, y) = clamp_menu_pos(
@@ -667,7 +669,7 @@ impl VideoView {
             .bg(gpui::rgb(0x2A2A2A))
             .border_1()
             .border_color(gpui::rgb(0x666666))
-            .px(px(4.0))
+            .p(px(MENU_PADDING))
             .text_color(gpui::white())
             .text_size(px(MENU_FONT_SIZE))
             .line_height(px(MENU_LINE_HEIGHT))
@@ -839,6 +841,11 @@ fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
                 .object_fit(ObjectFit::Fill),
         )
         .into_any_element()
+}
+
+/// 菜单总高度：所有菜单项行高 + 上下内边距。
+fn menu_height(item_count: usize) -> f32 {
+    MENU_LINE_HEIGHT * item_count as f32 + MENU_PADDING * 2.0
 }
 
 /// 把菜单左上角限制在窗口内，保证整块菜单可见。
@@ -1021,7 +1028,7 @@ mod tests {
 
     #[test]
     fn menu_position_is_clamped_to_window() {
-        let two = MENU_LINE_HEIGHT * 2.0;
+        let two = menu_height(2);
         assert_eq!(
             clamp_menu_pos(300.0, 200.0, 1000.0, 800.0, two),
             (300.0, 200.0)
@@ -1031,7 +1038,7 @@ mod tests {
             (1000.0 - MENU_WIDTH - MENU_MARGIN, 800.0 - two - MENU_MARGIN)
         );
         // 菜单项增加时，钳制高度随之变化，不会越界。
-        let five = MENU_LINE_HEIGHT * 5.0;
+        let five = menu_height(5);
         assert_eq!(
             clamp_menu_pos(990.0, 790.0, 1000.0, 800.0, five).1,
             800.0 - five - MENU_MARGIN
