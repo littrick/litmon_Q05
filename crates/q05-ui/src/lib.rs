@@ -5,6 +5,7 @@
 //! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；不做全局钩子。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -520,7 +521,16 @@ fn to_mouse_button(button: GpuiMouseButton) -> Option<MouseButton> {
 pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
+    let quitting = Arc::new(AtomicBool::new(false));
     application().run(move |cx: &mut App| {
+        // 最后一个窗口关闭后退出，避免 GPUI 在无窗口状态下继续访问已销毁的 HWND。
+        cx.on_window_closed(|cx, _window_id| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
         let bounds = Bounds::new(gpui::point(px(50.0), px(50.0)), size(px(1280.0), px(720.0)));
         match cx.open_window(
             WindowOptions {
@@ -528,6 +538,15 @@ pub fn run(rx: Receiver<VideoEvent>, hid: Option<HidHandle>) -> Result<()> {
                 ..Default::default()
             },
             move |window, cx| {
+                // 拦截系统关闭：直接 quit，阻止 GPUI 在窗口销毁后继续访问 HWND。
+                let quitting = quitting.clone();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    if !quitting.swap(true, Ordering::Relaxed) {
+                        cx.quit();
+                    }
+                    false
+                });
+
                 let view = cx.new(|cx| VideoView::new(rx, hid, cx));
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
