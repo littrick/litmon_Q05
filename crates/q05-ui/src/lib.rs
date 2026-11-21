@@ -24,7 +24,7 @@ use q05_input::{
     KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
     normalize_position_in_rect,
 };
-use q05_session::DevicePresence;
+use q05_session::{AudioStatus, DevicePresence};
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
@@ -34,19 +34,21 @@ const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 const HUD_BG_RGBA: u32 = 0x00000050;
 /// 文字颜色，格式 0xRRGGBBAA。
 const HUD_TEXT_RGBA: u32 = 0xFFFFFFFF;
-/// 字号（逻辑像素）；12 约等于原来的 text_xs。
-const HUD_FONT_SIZE: f32 = 10.0;
+/// HUD 小号字号（逻辑像素，默认）。
+const HUD_FONT_SMALL: f32 = 10.5;
+/// HUD 大号字号（逻辑像素）。
+const HUD_FONT_LARGE: f32 = 16.0;
 /// 行间距（逻辑像素）。
-const HUD_GAP: f32 = 1.0;
+const HUD_GAP: f32 = 0.0;
 /// 内边距 = 字号 × 该系数。
 const HUD_PADDING_FACTOR: f32 = 0.6;
 /// 距窗口右边缘/下边缘的距离（逻辑像素）。
-const HUD_MARGIN: f32 = 20.0;
+const HUD_MARGIN: f32 = 30.0;
 /// 圆角（逻辑像素）。
 const HUD_RADIUS: f32 = 4.0;
 
 /// 右键菜单字号（逻辑像素）。
-const MENU_FONT_SIZE: f32 = 12.0;
+const MENU_FONT_SIZE: f32 = 11.0;
 /// 菜单文字行高系数。
 const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
 /// 菜单宽度系数。
@@ -56,9 +58,43 @@ const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
 /// 右键菜单宽度（逻辑像素，由字号推导）。
 const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
 /// 菜单内边距（上下左右，逻辑像素）。
-const MENU_PADDING: f32 = 4.0;
+const MENU_PADDING: f32 = 0.0;
 /// 菜单距窗口边缘的最小距离（逻辑像素）。
 const MENU_MARGIN: f32 = 8.0;
+
+/// HUD 尺寸档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HudSize {
+    /// 小（默认）。
+    #[default]
+    Small,
+    /// 大。
+    Large,
+}
+
+impl HudSize {
+    fn font_size(self) -> f32 {
+        match self {
+            Self::Small => HUD_FONT_SMALL,
+            Self::Large => HUD_FONT_LARGE,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Small => "小",
+            Self::Large => "大",
+        }
+    }
+
+    /// 小 → 大 → 小。
+    fn next(self) -> Self {
+        match self {
+            Self::Small => Self::Large,
+            Self::Large => Self::Small,
+        }
+    }
+}
 
 /// 视频 + 输入视图。
 struct VideoView {
@@ -99,6 +135,9 @@ struct VideoView {
     device_present: bool,
     presence_seen: bool,
     device_message: Option<String>,
+    audio_status: AudioStatus,
+    hud_size: HudSize,
+    hud_top_right: bool,
 }
 
 impl VideoView {
@@ -106,6 +145,7 @@ impl VideoView {
         rx: Receiver<VideoEvent>,
         presence_rx: Receiver<DevicePresence>,
         hid_rx: Receiver<Option<HidHandle>>,
+        audio_rx: Receiver<AudioStatus>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -153,6 +193,21 @@ impl VideoView {
         })
         .detach();
 
+        cx.spawn(async move |this, cx| {
+            while let Ok(status) = audio_rx.recv().await {
+                let alive = this
+                    .update(cx, |view, cx| {
+                        view.audio_status = status;
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let input_enabled = false;
         Self {
             latest: None,
@@ -190,6 +245,9 @@ impl VideoView {
             device_present: false,
             presence_seen: false,
             device_message: None,
+            audio_status: AudioStatus::Stopped,
+            hud_size: HudSize::Small,
+            hud_top_right: false,
         }
     }
 
@@ -567,41 +625,59 @@ impl VideoView {
 
     /// 右下角状态方块：分辨率、FPS、坐标与按键透传计数。
     fn render_hud(&self, cx: &mut Context<Self>) -> AnyElement {
-        let resolution = if self.width > 0 && self.height > 0 {
-            format!("{}×{}", self.width, self.height)
+        let font = self.hud_size.font_size();
+        let device = if !self.presence_seen {
+            "设备检测中…"
+        } else if self.device_present {
+            "设备已连接"
         } else {
-            "--".to_string()
+            "设备未连接"
         };
-        div()
+        let video = if self.width > 0 && self.height > 0 {
+            format!("{}×{} · {:.0} fps", self.width, self.height, self.fps)
+        } else {
+            "视频未连接".to_string()
+        };
+        let audio = match self.audio_status {
+            AudioStatus::Stopped => "音频未连接",
+            AudioStatus::Starting => "音频启动中…",
+            AudioStatus::Running => "音频已连接",
+        };
+        let mut hud = div()
             .id("status-hud")
             .absolute()
             .right(px(HUD_MARGIN))
-            .bottom(px(HUD_MARGIN))
             .rounded(px(HUD_RADIUS))
             .bg(gpui::rgba(HUD_BG_RGBA))
             .text_color(gpui::rgba(HUD_TEXT_RGBA))
-            .text_size(px(HUD_FONT_SIZE))
-            .p(px(HUD_FONT_SIZE * HUD_PADDING_FACTOR))
+            .text_size(px(font))
+            .p(px(font * HUD_PADDING_FACTOR))
             .flex()
             .flex_col()
             .gap(px(HUD_GAP))
-            .child(format!("分辨率 {resolution}"))
-            .child(format!("FPS {:.1}", self.fps))
-            .child("右键：菜单")
+            .child(device)
+            .child(video)
+            .child(audio)
+            .child("右键打开菜单")
             .on_mouse_down(
                 GpuiMouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, _window, cx| {
                     view.open_context_menu(event, cx);
                     cx.stop_propagation();
                 }),
-            )
-            .into_any_element()
+            );
+        hud = if self.hud_top_right {
+            hud.top(px(HUD_MARGIN))
+        } else {
+            hud.bottom(px(HUD_MARGIN))
+        };
+        hud.into_any_element()
     }
 
     /// 单个菜单项。
     fn menu_item(
         label: &str,
-        on_select: impl Fn(&mut Window, &mut Context<Self>) + 'static,
+        on_select: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -614,7 +690,7 @@ impl VideoView {
                 cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
                     view.menu_open = false;
                     cx.stop_propagation();
-                    on_select(window, cx);
+                    on_select(view, window, cx);
                 }),
             )
             .child(label.to_string())
@@ -634,15 +710,35 @@ impl VideoView {
         let mut items: Vec<AnyElement> = Vec::new();
         items.push(Self::menu_item(
             if fullscreen { "退出全屏" } else { "全屏" },
-            |window, cx| {
+            |_view, window, cx| {
                 window.toggle_fullscreen();
                 cx.notify();
             },
             cx,
         ));
         items.push(Self::menu_item(
+            &format!("HUD 大小：{}", self.hud_size.label()),
+            |view, _window, cx| {
+                view.hud_size = view.hud_size.next();
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
+            if self.hud_top_right {
+                "HUD 移到右下"
+            } else {
+                "HUD 移到右上"
+            },
+            |view, _window, cx| {
+                view.hud_top_right = !view.hud_top_right;
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
             "关闭窗口",
-            |_window, cx| cx.defer(|cx| cx.quit()),
+            |_view, _window, cx| cx.defer(|cx| cx.quit()),
             cx,
         ));
 
@@ -667,8 +763,8 @@ impl VideoView {
             .whitespace_nowrap()
             .rounded_md()
             .bg(gpui::rgb(0x2A2A2A))
-            .border_1()
-            .border_color(gpui::rgb(0x666666))
+            // .border_1()
+            // .border_color(gpui::rgb(0x666666))
             .p(px(MENU_PADDING))
             .text_color(gpui::white())
             .text_size(px(MENU_FONT_SIZE))
@@ -938,6 +1034,7 @@ pub fn run(
     rx: Receiver<VideoEvent>,
     presence_rx: Receiver<DevicePresence>,
     hid_rx: Receiver<Option<HidHandle>>,
+    audio_rx: Receiver<AudioStatus>,
 ) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
@@ -967,7 +1064,7 @@ pub fn run(
                     false
                 });
 
-                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid_rx, cx));
+                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid_rx, audio_rx, cx));
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
                     let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {
@@ -1024,6 +1121,14 @@ mod tests {
         assert!(close(rect.y, 40.0));
         assert!(close(rect.width, 1280.0));
         assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn hud_size_presets_are_ordered_and_cycle() {
+        assert!(HudSize::Small.font_size() < HudSize::Large.font_size());
+        assert_eq!(HudSize::default(), HudSize::Small);
+        assert_eq!(HudSize::Small.next(), HudSize::Large);
+        assert_eq!(HudSize::Large.next(), HudSize::Small);
     }
 
     #[test]

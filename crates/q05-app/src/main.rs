@@ -29,10 +29,12 @@ fn main() -> Result<()> {
     let (video_tx, video_rx) = async_channel::bounded(2);
     let (hid_tx, hid_rx) = async_channel::bounded(8);
     let (presence_tx, presence_rx) = async_channel::bounded(8);
+    let (audio_tx, audio_rx) = async_channel::bounded(8);
 
-    let mut supervisor = q05_session::MediaSupervisor::start(video_tx, hid_tx, presence_tx)?;
+    let mut supervisor =
+        q05_session::MediaSupervisor::start(video_tx, hid_tx, presence_tx, audio_tx)?;
 
-    let result = q05_ui::run(video_rx, presence_rx, hid_rx);
+    let result = q05_ui::run(video_rx, presence_rx, hid_rx, audio_rx);
     supervisor.stop();
     result
 }

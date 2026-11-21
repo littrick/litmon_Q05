@@ -10,7 +10,7 @@ mod media;
 mod presence;
 
 #[cfg(windows)]
-pub use media::MediaSupervisor;
+pub use media::{AudioStatus, MediaSupervisor};
 #[cfg(windows)]
 pub use presence::{DeviceError, DeviceMonitor, DevicePresence, query_presence};
 

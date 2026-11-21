@@ -12,6 +12,18 @@ use q05_video::{VideoCapture, VideoEvent, VideoFormat};
 
 use crate::presence::{DeviceMonitor, DevicePresence};
 
+/// 音频链路状态，供 UI 展示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioStatus {
+    /// 未启动或已停止。
+    #[default]
+    Stopped,
+    /// 正在启动/重试。
+    Starting,
+    /// 正在采集和播放。
+    Running,
+}
+
 /// 管理视频/HID/音频三条流的后台 supervisor。
 ///
 /// `video_tx` / `hid_tx` / `presence_tx` 由 UI 侧持有接收端；
@@ -27,12 +39,13 @@ impl MediaSupervisor {
         video_tx: Sender<VideoEvent>,
         hid_tx: Sender<Option<HidHandle>>,
         presence_tx: Sender<DevicePresence>,
+        audio_tx: Sender<AudioStatus>,
     ) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let thread = thread::Builder::new()
             .name("q05-media".into())
-            .spawn(move || run(video_tx, hid_tx, presence_tx, stop_thread))?;
+            .spawn(move || run(video_tx, hid_tx, presence_tx, audio_tx, stop_thread))?;
         Ok(Self {
             stop,
             thread: Some(thread),
@@ -58,6 +71,7 @@ fn run(
     video_tx: Sender<VideoEvent>,
     hid_tx: Sender<Option<HidHandle>>,
     presence_tx: Sender<DevicePresence>,
+    audio_tx: Sender<AudioStatus>,
     stop: Arc<AtomicBool>,
 ) {
     let (monitor_tx, monitor_rx) = async_channel::bounded(8);
@@ -95,6 +109,7 @@ fn run(
                     worker.stop();
                     tracing::info!("audio stopped (device disconnected)");
                 }
+                let _ = audio_tx.try_send(AudioStatus::Stopped);
                 next_retry = Instant::now();
             }
         }
@@ -104,6 +119,7 @@ fn run(
         {
             tracing::warn!("audio worker exited; will retry on a fresh thread");
             audio.take();
+            let _ = audio_tx.try_send(AudioStatus::Stopped);
             next_retry = Instant::now() + Duration::from_secs(1);
         }
 
@@ -153,9 +169,11 @@ fn run(
             }
 
             if audio.is_none() {
-                match AudioWorker::start() {
+                let _ = audio_tx.try_send(AudioStatus::Starting);
+                match AudioWorker::start(audio_tx.clone()) {
                     Ok(worker) => audio = Some(worker),
                     Err(err) => {
+                        let _ = audio_tx.try_send(AudioStatus::Stopped);
                         tracing::warn!(error = %err, "audio worker start failed; will retry");
                     }
                 }
@@ -176,6 +194,7 @@ fn run(
     if let Some(mut worker) = audio.take() {
         worker.stop();
     }
+    let _ = audio_tx.try_send(AudioStatus::Stopped);
     drop(monitor);
 }
 
@@ -190,21 +209,24 @@ struct AudioWorker {
 }
 
 impl AudioWorker {
-    fn start() -> std::io::Result<Self> {
+    fn start(audio_tx: Sender<AudioStatus>) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let thread = thread::Builder::new()
             .name("q05-audio".into())
             .spawn(move || match AudioEngine::start() {
                 Ok(engine) => {
+                    let _ = audio_tx.try_send(AudioStatus::Running);
                     tracing::info!("audio started");
                     while !stop_thread.load(Ordering::Relaxed) {
                         thread::sleep(Duration::from_millis(200));
                     }
                     drop(engine);
+                    let _ = audio_tx.try_send(AudioStatus::Stopped);
                     tracing::info!("audio worker stopped");
                 }
                 Err(err) => {
+                    let _ = audio_tx.try_send(AudioStatus::Stopped);
                     tracing::warn!(
                         error = %err,
                         "audio start failed on fresh thread; will retry"
