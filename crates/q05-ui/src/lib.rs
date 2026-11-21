@@ -146,6 +146,7 @@ struct VideoView {
     audio_status: AudioStatus,
     hud_size: HudSize,
     hud_top_right: bool,
+    always_on_top: bool,
 }
 
 impl VideoView {
@@ -256,6 +257,7 @@ impl VideoView {
             audio_status: AudioStatus::Stopped,
             hud_size: HudSize::Small,
             hud_top_right: false,
+            always_on_top: false,
         }
     }
 
@@ -745,6 +747,15 @@ impl VideoView {
             cx,
         ));
         items.push(Self::menu_item(
+            topmost_label(self.always_on_top),
+            |view, window, cx| {
+                view.always_on_top = !view.always_on_top;
+                set_always_on_top(window, view.always_on_top);
+                cx.notify();
+            },
+            cx,
+        ));
+        items.push(Self::menu_item(
             "关闭窗口",
             |_view, _window, cx| cx.defer(|cx| cx.quit()),
             cx,
@@ -1104,6 +1115,52 @@ pub fn run(
     }
 }
 
+/// 菜单里的置顶文案（显示点击后的动作）。
+fn topmost_label(always_on_top: bool) -> &'static str {
+    if always_on_top {
+        "取消置顶"
+    } else {
+        "置顶"
+    }
+}
+
+/// 切换窗口最上层。
+#[cfg(windows)]
+fn set_always_on_top(window: &Window, always_on_top: bool) {
+    use raw_window_handle::RawWindowHandle;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(hwnd) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(hwnd.hwnd.get() as *mut core::ffi::c_void);
+    let after = if always_on_top {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn set_always_on_top(_window: &Window, _always_on_top: bool) {}
+
 /// 显式设置窗口大/小图标，确保任务栏使用嵌入的 logo（资源 ID 1）。
 #[cfg(windows)]
 fn apply_window_icon(window: &Window) {
@@ -1197,6 +1254,12 @@ mod tests {
         assert!(close(rect.y, 40.0));
         assert!(close(rect.width, 1280.0));
         assert!(close(rect.height, 720.0));
+    }
+
+    #[test]
+    fn topmost_label_shows_next_action() {
+        assert_eq!(topmost_label(false), "置顶");
+        assert_eq!(topmost_label(true), "取消置顶");
     }
 
     #[test]
