@@ -72,7 +72,7 @@ fn run(
 
     let mut connected = false;
     let mut video: Option<VideoCapture> = None;
-    let mut audio: Option<AudioEngine> = None;
+    let mut audio: Option<AudioWorker> = None;
     let mut hid_ready = false;
     let mut next_retry = Instant::now();
 
@@ -91,10 +91,20 @@ fn run(
                     hid_ready = false;
                     tracing::info!("input hidden (device disconnected)");
                 }
-                audio = None;
-                tracing::info!("audio stopped (device disconnected)");
+                if let Some(mut worker) = audio.take() {
+                    worker.stop();
+                    tracing::info!("audio stopped (device disconnected)");
+                }
                 next_retry = Instant::now();
             }
+        }
+
+        if let Some(worker) = &audio
+            && worker.is_finished()
+        {
+            tracing::warn!("audio worker exited; will retry on a fresh thread");
+            audio.take();
+            next_retry = Instant::now() + Duration::from_secs(1);
         }
 
         if let Some(capture) = &video
@@ -143,13 +153,10 @@ fn run(
             }
 
             if audio.is_none() {
-                match AudioEngine::start() {
-                    Ok(engine) => {
-                        audio = Some(engine);
-                        tracing::info!("audio started");
-                    }
+                match AudioWorker::start() {
+                    Ok(worker) => audio = Some(worker),
                     Err(err) => {
-                        tracing::warn!(error = %err, "audio start failed; will retry");
+                        tracing::warn!(error = %err, "audio worker start failed; will retry");
                     }
                 }
             }
@@ -166,6 +173,66 @@ fn run(
     if hid_ready {
         let _ = hid_tx.try_send(None);
     }
-    drop(audio);
+    if let Some(mut worker) = audio.take() {
+        worker.stop();
+    }
     drop(monitor);
+}
+
+/// 在一个独立线程里持有音频引擎。
+///
+/// Windows 上 cpal/COM 的线程状态在设备重插后可能被“污染”，
+/// 同一线程重开 `IAudioClient` 会持续返回 `RPC_E_CHANGED_MODE`。
+/// 因此每次尝试都使用全新线程；失败时线程退出，由 supervisor 重新拉起。
+struct AudioWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AudioWorker {
+    fn start() -> std::io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let thread = thread::Builder::new()
+            .name("q05-audio".into())
+            .spawn(move || match AudioEngine::start() {
+                Ok(engine) => {
+                    tracing::info!("audio started");
+                    while !stop_thread.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(200));
+                    }
+                    drop(engine);
+                    tracing::info!("audio worker stopped");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "audio start failed on fresh thread; will retry"
+                    );
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for AudioWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
