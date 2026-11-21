@@ -95,6 +95,63 @@ impl Frame {
         }
     }
 
+    /// 握手 / 版本查询（cmd `0x01`）。
+    pub fn handshake() -> Self {
+        Self::new(cmd::HANDSHAKE, Vec::new())
+    }
+
+    /// 读取设备信息（cmd `0x09`）。
+    pub fn get_device_info() -> Self {
+        Self::new(cmd::GET_DEVICE_INFO, Vec::new())
+    }
+
+    /// 鼠标绝对事件（cmd `0x02`）；坐标是 0..65535 归一化值。
+    pub fn mouse_abs(x: u16, y: u16, left: bool, right: bool, middle: bool, wheel: i8) -> Self {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.push(u8::from(left));
+        payload.push(u8::from(right));
+        payload.push(u8::from(middle));
+        payload.push(wheel as u8);
+        Self::new(cmd::MOUSE_ABS, payload)
+    }
+
+    /// 鼠标相对事件（cmd `0x04`）。
+    pub fn mouse_rel(dx: i16, dy: i16, left: bool, right: bool, middle: bool, wheel: i8) -> Self {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&dx.to_le_bytes());
+        payload.extend_from_slice(&dy.to_le_bytes());
+        payload.push(u8::from(left));
+        payload.push(u8::from(right));
+        payload.push(u8::from(middle));
+        payload.push(wheel as u8);
+        Self::new(cmd::MOUSE_REL, payload)
+    }
+
+    /// 键盘报告（cmd `0x03`）；keys 是 HID usage，最多 6 个。
+    pub fn keyboard(modifiers: u8, keys: [u8; 6]) -> Self {
+        let mut payload = Vec::with_capacity(7);
+        payload.push(modifiers);
+        payload.extend_from_slice(&keys);
+        Self::new(cmd::KEYBOARD, payload)
+    }
+
+    /// 释放所有键（全 0 键盘报告）。
+    pub fn keyboard_release() -> Self {
+        Self::keyboard(0, [0; 6])
+    }
+
+    /// 设置 LED / 状态寄存器（cmd `0x05`）。
+    pub fn set_led(value: u8) -> Self {
+        Self::new(cmd::SET_LED, vec![value])
+    }
+
+    /// 读取 LED / 状态寄存器（cmd `0x06`）。
+    pub fn get_led() -> Self {
+        Self::new(cmd::GET_LED, vec![0])
+    }
+
     /// `(0xBB + cmd + sum(payload)) & 0xffff`
     pub fn checksum(&self) -> u16 {
         let mut sum: u32 = 0xBB + self.cmd as u32;
@@ -627,6 +684,36 @@ mod tests {
         let f = Frame::new(cmd::MOUSE_ABS, vec![1, 0, 2, 0, 0, 0, 0, 0]);
         let enc = f.encode();
         assert!(Frame::decode_lenient(&enc[..enc.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn mouse_abs_constructor() {
+        let f = Frame::mouse_abs(100, 200, true, false, false, -1);
+        assert_eq!(f.cmd, cmd::MOUSE_ABS);
+        assert_eq!(f.payload, vec![100, 0, 200, 0, 1, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn mouse_rel_constructor() {
+        let f = Frame::mouse_rel(-5, 3, false, true, false, 1);
+        assert_eq!(f.cmd, cmd::MOUSE_REL);
+        assert_eq!(f.payload, vec![0xfb, 0xff, 3, 0, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn keyboard_constructors() {
+        let f = Frame::keyboard(0x02, [0x04, 0, 0, 0, 0, 0]);
+        assert_eq!(f.cmd, cmd::KEYBOARD);
+        assert_eq!(f.payload, vec![0x02, 0x04, 0, 0, 0, 0, 0]);
+        assert_eq!(Frame::keyboard_release().payload, vec![0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn led_constructors() {
+        assert_eq!(Frame::set_led(1).payload, vec![1]);
+        assert_eq!(Frame::get_led().payload, vec![0]);
+        assert_eq!(Frame::handshake().cmd, cmd::HANDSHAKE);
+        assert_eq!(Frame::get_device_info().cmd, cmd::GET_DEVICE_INFO);
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
