@@ -102,11 +102,16 @@ pub enum VideoError {
     Thread(String),
 }
 
+mod screen;
+pub use screen::ScreenState;
+
 /// 采集线程发布的事件。
 #[derive(Debug, Clone)]
 pub enum VideoEvent {
     /// 新帧。
     Frame(Frame),
+    /// 目标屏幕状态变化（正常/无信号/息屏）。
+    ScreenState(ScreenState),
     /// 采集错误（线程即将退出）。
     Error(VideoError),
     /// 线程已停止。
@@ -376,6 +381,7 @@ mod platform {
 
         let reader = unsafe { create_reader(format)? };
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let mut screen = crate::screen::ScreenDetector::new();
 
         while !stop.load(Ordering::Relaxed) {
             let mut flags = 0u32;
@@ -436,6 +442,11 @@ mod platform {
                 continue;
             };
             let decoded_at = Instant::now();
+
+            if let Some(state) = screen.analyze(&bgra, width, height) {
+                tracing::info!(screen_state = ?state, "screen state changed");
+                let _ = event_tx.try_send(VideoEvent::ScreenState(state));
+            }
 
             stats.frames.fetch_add(1, Ordering::Relaxed);
             stats.decode_total_us.fetch_add(

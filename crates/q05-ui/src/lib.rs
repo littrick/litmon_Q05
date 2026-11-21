@@ -24,7 +24,7 @@ use q05_input::{
     KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
     normalize_position_in_rect,
 };
-use q05_video::{Frame, VideoError, VideoEvent};
+use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 
@@ -50,6 +50,7 @@ struct VideoView {
     last_mouse_send: Instant,
     mouse_logged: bool,
     log_all_mouse: bool,
+    screen_state: ScreenState,
 }
 
 impl VideoView {
@@ -95,6 +96,7 @@ impl VideoView {
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
             mouse_logged: false,
             log_all_mouse: std::env::var_os("Q05_MOUSE_LOG").is_some(),
+            screen_state: ScreenState::Live,
         }
     }
 
@@ -109,6 +111,10 @@ impl VideoView {
                 self.hid = None;
                 self.status =
                     format!("视频错误：{err}\n请退出 AweSun 的 Q0.5 窗口/进程后重启；输入已停用");
+            }
+            VideoEvent::ScreenState(state) => {
+                self.screen_state = state;
+                tracing::info!(screen_state = ?state, "target screen state");
             }
             VideoEvent::Stopped => {
                 tracing::info!("video capture stopped");
@@ -169,6 +175,7 @@ impl VideoView {
             width = self.width,
             height = self.height,
             input_enabled = self.input_enabled,
+            screen_state = ?self.screen_state,
             hid_sent = hid.sent,
             hid_acks = hid.acks,
             hid_heartbeats = hid.heartbeats,
@@ -391,9 +398,15 @@ impl Render for VideoView {
         };
 
         let focus_handle = self.focus_handle.clone();
-        div()
+        let screen_label = match self.screen_state {
+            ScreenState::Live => None,
+            ScreenState::NoSignal => Some("目标屏幕无信号 / 已息屏"),
+            ScreenState::Blank => Some("目标屏幕已息屏"),
+        };
+        let mut root = div()
             .track_focus(&focus_handle)
             .size_full()
+            .relative()
             .bg(gpui::black())
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 view.on_key_down(event, window, cx)
@@ -441,7 +454,23 @@ impl Render for VideoView {
             .on_scroll(
                 cx.listener(|view, event: &ScrollEvent, window, _cx| view.on_scroll(event, window)),
             )
-            .child(content)
+            .child(content);
+        if let Some(label) = screen_label {
+            root = root.child(
+                div()
+                    .absolute()
+                    .left(px(12.0))
+                    .bottom(px(12.0))
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded_md()
+                    .bg(gpui::rgb(0x202020))
+                    .text_color(gpui::white())
+                    .text_sm()
+                    .child(label),
+            );
+        }
+        root
     }
 }
 
