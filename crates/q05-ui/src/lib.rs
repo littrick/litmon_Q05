@@ -30,25 +30,31 @@ use q05_video::{Frame, ScreenState, VideoError, VideoEvent};
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 
 // ==================== 右下角状态方块（HUD）可调参数 ====================
-/// 背景色，格式 0xRRGGBBAA；当前为 70% 不透明黑色。
-const HUD_BG_RGBA: u32 = 0x000000B3;
+/// 背景色，格式 0xRRGGBBAA；当前为 50% 不透明黑色。
+const HUD_BG_RGBA: u32 = 0x00000050;
 /// 文字颜色，格式 0xRRGGBBAA。
 const HUD_TEXT_RGBA: u32 = 0xFFFFFFFF;
 /// 字号（逻辑像素）；12 约等于原来的 text_xs。
-const HUD_FONT_SIZE: f32 = 12.0;
+const HUD_FONT_SIZE: f32 = 10.0;
 /// 行间距（逻辑像素）。
 const HUD_GAP: f32 = 1.0;
 /// 内边距 = 字号 × 该系数。
 const HUD_PADDING_FACTOR: f32 = 0.6;
 /// 距窗口右边缘/下边缘的距离（逻辑像素）。
-const HUD_MARGIN: f32 = 8.0;
+const HUD_MARGIN: f32 = 20.0;
 /// 圆角（逻辑像素）。
-const HUD_RADIUS: f32 = 6.0;
+const HUD_RADIUS: f32 = 4.0;
 
-/// 右键菜单宽度（逻辑像素）。
-const MENU_WIDTH: f32 = 150.0;
-/// 右键菜单高度（逻辑像素）。
-const MENU_HEIGHT: f32 = 44.0;
+/// 右键菜单字号（逻辑像素）。
+const MENU_FONT_SIZE: f32 = 12.0;
+/// 菜单文字行高系数。
+const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
+/// 菜单宽度系数。
+const MENU_LINE_WIDTH_FACTOR: f32 = 12.0;
+/// 菜单高度：与文字行高一致，同时用于贴边钳制。
+const MENU_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
+/// 右键菜单宽度：与文字行高相关
+const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
 
 /// 视频 + 输入视图。
 struct VideoView {
@@ -607,9 +613,10 @@ impl VideoView {
             .bg(gpui::rgb(0x2A2A2A))
             .border_1()
             .border_color(gpui::rgb(0x666666))
-            .p(px(4.0))
+            .px(px(4.0))
             .text_color(gpui::white())
-            .text_sm()
+            .text_size(px(MENU_FONT_SIZE))
+            .line_height(px(MENU_HEIGHT))
             .on_mouse_down(
                 GpuiMouseButton::Left,
                 cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
@@ -620,7 +627,6 @@ impl VideoView {
             .child(
                 div()
                     .px(px(10.0))
-                    .py(px(8.0))
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(|style| style.bg(gpui::rgb(0x444444)))
@@ -966,7 +972,10 @@ mod tests {
     #[test]
     fn menu_position_is_clamped_to_window() {
         assert_eq!(clamp_menu_pos(300.0, 200.0, 1000.0, 800.0), (300.0, 200.0));
-        assert_eq!(clamp_menu_pos(990.0, 790.0, 1000.0, 800.0), (842.0, 748.0));
+        assert_eq!(
+            clamp_menu_pos(990.0, 790.0, 1000.0, 800.0),
+            (842.0, 800.0 - MENU_HEIGHT - 8.0)
+        );
         assert_eq!(clamp_menu_pos(0.0, 0.0, 100.0, 100.0), (8.0, 8.0));
     }
 
