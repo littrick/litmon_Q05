@@ -1,0 +1,7 @@
+[package]
+name = "q05-audio"
+version.workspace = true
+edition.workspace = true
+description = "Q0.5 UAC 音频采集与本地播放（WASAPI）"
+
+[dependencies]

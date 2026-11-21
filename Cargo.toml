@@ -1,11 +1,7 @@
-[package]
-name = "q05-app"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
-members = ["crates/q05-proto"]
+members = ["crates/*"]
 resolver = "3"
 
-[dependencies]
-q05-proto = { path = "crates/q05-proto" }
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

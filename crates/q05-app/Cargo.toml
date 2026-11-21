@@ -1,0 +1,8 @@
+[package]
+name = "q05-app"
+version.workspace = true
+edition.workspace = true
+description = "litmon-q05 主程序"
+
+[dependencies]
+q05-proto = { path = "../q05-proto" }

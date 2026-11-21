@@ -1,7 +1,7 @@
 [package]
 name = "q05-proto"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Oray Q0.5 输入 HID 私有协议编解码（413D:2107）"
 
 [dependencies]

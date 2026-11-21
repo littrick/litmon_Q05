@@ -1,0 +1,7 @@
+[package]
+name = "q05-session"
+version.workspace = true
+edition.workspace = true
+description = "Q0.5 会话编排、生命周期、配置、指标"
+
+[dependencies]
