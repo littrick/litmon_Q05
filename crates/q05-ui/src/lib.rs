@@ -97,11 +97,19 @@ impl VideoView {
             VideoEvent::Frame(frame) => self.set_frame(frame),
             VideoEvent::Error(err) => {
                 tracing::error!(error = %err, "video capture error");
-                self.status = format!("视频错误：{err}");
+                // 独占模式：没有画面就不注入输入，避免与 AweSun 等抢占。
+                self.release_all();
+                self.input_enabled = false;
+                self.hid = None;
+                self.status =
+                    format!("视频错误：{err}\n请退出 AweSun 的 Q0.5 窗口/进程后重启；输入已停用");
             }
             VideoEvent::Stopped => {
                 tracing::info!("video capture stopped");
-                self.status = "视频已停止".to_string();
+                self.release_all();
+                self.input_enabled = false;
+                self.hid = None;
+                self.status = "视频已停止；输入已停用".to_string();
             }
         }
     }
