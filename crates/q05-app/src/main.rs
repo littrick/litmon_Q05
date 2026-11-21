@@ -11,11 +11,7 @@ fn main() -> Result<()> {
         .init();
 
     let (tx, rx) = async_channel::bounded(2);
-    let mut capture = q05_video::VideoCapture::start(
-        q05_video::VideoFormat::FHD30,
-        q05_video::ShareMode::Controlling,
-        tx,
-    )?;
+    let mut capture = q05_video::VideoCapture::start(q05_video::VideoFormat::FHD30, tx)?;
 
     let result = q05_ui::run(rx);
     capture.stop();

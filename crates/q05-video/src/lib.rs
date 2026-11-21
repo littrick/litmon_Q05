@@ -8,9 +8,9 @@
 //!
 //! LF0 真机验证结论：
 //! - native MJPEG 1080p30 可用，解码约 10ms/帧；
-//! - `ShareMode::Sharing` 不能设置媒体类型，必须由 controlling 客户端先定格式；
-//! - share-only 会失败（`0xC00D5212`），因此没有其他 controlling 客户端时应使用
-//!   [`ShareMode::Controlling`]。
+//! - 产品固定使用**独占采集**（`share_mode=0`）。运行时若相机被 AweSun 占用，
+//!   需要提示用户退出 AweSun 的 Q0.5 窗口/进程。
+//! - 共享模式实验已完成，但**不纳入产品需求**。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -50,15 +50,6 @@ impl Default for VideoFormat {
     fn default() -> Self {
         Self::FHD30
     }
-}
-
-/// MF 采集模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShareMode {
-    /// 独占/控制模式：可以设置媒体类型。没有其他客户端时使用。
-    Controlling,
-    /// 共享模式：不能设置媒体类型，必须已有 controlling 客户端（例如 AweSun）。
-    Sharing,
 }
 
 /// 一帧已解码的 BGRA 图像。
@@ -172,11 +163,7 @@ impl VideoCapture {
     ///
     /// `event_tx` 建议使用容量 2 的有界 channel；UI 慢时新帧会被丢弃，
     /// 而不是无限堆积。
-    pub fn start(
-        format: VideoFormat,
-        share: ShareMode,
-        event_tx: Sender<VideoEvent>,
-    ) -> std::io::Result<Self> {
+    pub fn start(format: VideoFormat, event_tx: Sender<VideoEvent>) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
         let stop_thread = stop.clone();
@@ -184,7 +171,7 @@ impl VideoCapture {
         let thread = thread::Builder::new()
             .name("q05-video".into())
             .spawn(move || {
-                let result = platform::run(format, share, &event_tx, &stop_thread, &stats_thread);
+                let result = platform::run(format, &event_tx, &stop_thread, &stats_thread);
                 match result {
                     Ok(()) => {
                         let _ = event_tx.try_send(VideoEvent::Stopped);
@@ -252,7 +239,7 @@ mod platform {
     };
     use windows::core::GUID;
 
-    use crate::{Frame, ShareMode, Stats, VideoError, VideoEvent, VideoFormat, rgb_to_bgra};
+    use crate::{Frame, Stats, VideoError, VideoEvent, VideoFormat, rgb_to_bgra};
 
     // Windows SDK mfidl.h:
     // EXTERN_GUID(MF_DEVSOURCE_ATTRIBUTE_FRAMESERVER_SHARE_MODE,
@@ -311,8 +298,7 @@ mod platform {
         Ok(out)
     }
 
-    /// 每次返回独立的 `IMFActivate`；同一个 activate 会缓存 source，导致
-    /// share_mode 属性被忽略。
+    /// 每次返回独立的 `IMFActivate`（同一个 activate 会缓存已激活的 source）。
     unsafe fn find_target() -> Result<IMFActivate, VideoError> {
         let devices = unsafe { enumerate_video_devices()? };
         for activate in &devices {
@@ -324,16 +310,10 @@ mod platform {
         Err(VideoError::NotFound)
     }
 
-    unsafe fn create_reader(
-        format: VideoFormat,
-        share: ShareMode,
-    ) -> Result<IMFSourceReader, VideoError> {
+    unsafe fn create_reader(format: VideoFormat) -> Result<IMFSourceReader, VideoError> {
         let activate = unsafe { find_target()? };
-        let share_value = match share {
-            ShareMode::Controlling => 0,
-            ShareMode::Sharing => 1,
-        };
-        unsafe { activate.SetUINT32(&FRAMESERVER_SHARE_MODE, share_value) }.map_err(win_err)?;
+        // 产品固定独占采集。
+        unsafe { activate.SetUINT32(&FRAMESERVER_SHARE_MODE, 0) }.map_err(win_err)?;
         let source: IMFMediaSource = unsafe { activate.ActivateObject() }.map_err(win_err)?;
 
         let mut attrs: Option<IMFAttributes> = None;
@@ -353,11 +333,6 @@ mod platform {
         }
         let reader =
             unsafe { MFCreateSourceReaderFromMediaSource(&source, &attrs) }.map_err(win_err)?;
-
-        if share == ShareMode::Sharing {
-            tracing::info!("video: sharing mode, skip SetCurrentMediaType");
-            return Ok(reader);
-        }
 
         let mt = unsafe { MFCreateMediaType() }.map_err(win_err)?;
         unsafe {
@@ -389,7 +364,6 @@ mod platform {
 
     pub(crate) fn run(
         format: VideoFormat,
-        share: ShareMode,
         event_tx: &Sender<VideoEvent>,
         stop: &Arc<AtomicBool>,
         stats: &Arc<Stats>,
@@ -400,7 +374,7 @@ mod platform {
         }
         let _guard = ComGuard;
 
-        let reader = unsafe { create_reader(format, share)? };
+        let reader = unsafe { create_reader(format)? };
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
         while !stop.load(Ordering::Relaxed) {
@@ -495,11 +469,10 @@ mod platform {
 
     use async_channel::Sender;
 
-    use crate::{ShareMode, Stats, VideoError, VideoEvent, VideoFormat};
+    use crate::{Stats, VideoError, VideoEvent, VideoFormat};
 
     pub(crate) fn run(
         _format: VideoFormat,
-        _share: ShareMode,
         _event_tx: &Sender<VideoEvent>,
         _stop: &Arc<AtomicBool>,
         _stats: &Arc<Stats>,
