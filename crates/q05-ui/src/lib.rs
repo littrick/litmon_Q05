@@ -478,11 +478,10 @@ impl VideoView {
             cx.notify();
             return;
         }
-        // F11 切换全屏，不透传给目标。
-        if event.keystroke.key.eq_ignore_ascii_case("f11") {
+        // F11 本地切换全屏，同时继续按普通按键透传给目标。
+        if event.keystroke.key.eq_ignore_ascii_case("f11") && !event.is_held {
             window.toggle_fullscreen();
             cx.notify();
-            return;
         }
         let modifiers = to_modifiers(&event.keystroke.modifiers);
         // 安全开关：Ctrl+Alt+Q。
@@ -746,6 +745,19 @@ impl VideoView {
             },
             cx,
         ));
+        if self.width > 0 && self.height > 0 {
+            items.push(Self::menu_item(
+                "自适应大小",
+                |view, window, cx| {
+                    let viewport = window.viewport_size();
+                    let width = f32::from(viewport.width);
+                    let height = width * view.height as f32 / view.width as f32;
+                    window.resize(size(px(width), px(height)));
+                    cx.notify();
+                },
+                cx,
+            ));
+        }
         items.push(Self::menu_item(
             topmost_label(self.always_on_top),
             |view, window, cx| {
