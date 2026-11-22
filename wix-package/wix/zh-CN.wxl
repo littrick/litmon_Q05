@@ -1,0 +1,10 @@
+<WixLocalization Culture="zh-cn" Codepage="936" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+    <String Id="ApplicationName" Value="litmon Q0.5 客户端" />
+    <String Id="PackageName" Value="litmon Q0.5 客户端" />
+    <String Id="PackageManufacturer" Value="littrick" />
+    <String Id="FeatureBinariesTitle" Value="安装 litmon Q0.5 客户端" />
+    <String Id="FeatureBinariesDescription" Value="安装 litmon Q0.5 客户端及许可证/说明文件" />
+    <String Id="FeatureDesktopShortcutsTitle" Value="桌面快捷方式" />
+    <String Id="FeatureDesktopShortcutsDescription" Value="在桌面创建 litmon Q0.5 快捷方式" />
+    <String Id="LaunchAppDescription" Value="启动 litmon Q0.5 客户端" />
+</WixLocalization>

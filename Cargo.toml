@@ -1,8 +1,12 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "wix-package"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["littrick <github.com/littrick>"]
 license = "MIT"
+repository = "https://github.com/littrick/litmon_Q05"
+description = "litmon-q05: 用于 Oray Q0.5 的第三方 Windows 客户端"
+keywords = ["oray", "q0.5", "kvm", "remote", "windows"]

@@ -1,0 +1,34 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <?include var.wxi?>
+    <Package
+        Name="!(loc.PackageName)"
+        Manufacturer="!(loc.PackageManufacturer)"
+        UpgradeCode="$(var.UpgradeCode)"
+        Version="$(var.Version)"
+        Scope="perMachine"
+        Compressed="yes">
+
+        <ComponentGroupRef Id="Directories" />
+
+        <Feature Id="Binaries"
+            Title="!(loc.FeatureBinariesTitle)"
+            Description="!(loc.FeatureBinariesDescription)"
+            ConfigurableDirectory="APPINSTALLFOLDER"
+            Display="expand"
+            AllowAbsent="no">
+            <ComponentRef Id="binary" />
+            <ComponentRef Id="License" />
+            <ComponentRef Id="Readme" />
+            <ComponentRef Id="ApplicationShortcut" />
+
+            <Feature Id="DesktopShortcuts"
+                Title="!(loc.FeatureDesktopShortcutsTitle)"
+                Description="!(loc.FeatureDesktopShortcutsDescription)">
+                <ComponentRef Id="ApplicationShortcutDesktop" />
+            </Feature>
+        </Feature>
+
+        <MediaTemplate EmbedCab="yes" />
+        <UIRef Id="PackageUI" />
+    </Package>
+</Wix>

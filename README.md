@@ -45,7 +45,8 @@ crates/
 ├─ q05-audio/     Q0.5 UAC 采集 + 默认输出播放
 ├─ q05-session/   设备在线检测、媒体 supervisor、自动重连
 ├─ q05-ui/        GPUI 界面、HUD、右键菜单、窗口内输入
-└─ q05-app/       程序入口、控制台/图标等 Windows 集成
+├─ q05-app/       程序入口、控制台/图标等 Windows 集成
+└─ wix-package/   WiX MSI 打包器
 ```
 
 ## 系统要求
@@ -84,6 +85,28 @@ cargo run -p q05-app -- --console
 | 右键 HUD | 打开菜单：全屏、自适应大小、置顶、HUD 大小/位置、关闭窗口 |
 | 左键/滚轮/键盘 | 窗口内透传给目标 |
 | 右键视频区域 | 透传给目标，不弹本地菜单 |
+
+## 发布与打包
+
+GitHub Actions 在推送 `v*` tag 或手动触发时构建 Windows x64 / arm64 两个版本：
+
+- 免安装包：`litmon-q05-<version>-windows-<arch>.zip`
+- 安装包：`litmon-q05-<version>-windows-<arch>.msi`
+
+本地打包需要 WiX Toolset 6：
+
+```powershell
+dotnet tool install --global wix --version 6.0.2
+wix extension add -g WixToolset.UI.wixext/6.0.2
+
+cargo build --release -p q05-app --target x86_64-pc-windows-msvc
+$env:Q05_ARCH = "x64"
+$env:Q05_VERSION = "1.0.0"
+$env:Q05_EXE = "$PWD	arget_64-pc-windows-msvcelease\litmon-q05.exe"
+cargo run --release -p wix-package
+```
+
+ARM64 将 `Q05_ARCH` 改为 `arm64`，目标改为 `aarch64-pc-windows-msvc`。
 
 ## 已知限制
 

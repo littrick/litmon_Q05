@@ -1,0 +1,54 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <?include var.wxi?>
+    <Fragment>
+        <StandardDirectory Id="ProgramFiles6432Folder">
+            <Directory Id="APPINSTALLFOLDER" Name="$(var.AppName)">
+                <Component Id="binary" Guid="{A65B0102-4A02-41C1-8B04-75D7B36DDC50}">
+                    <File Id="ExeFile" Source="$(var.AppExe)" KeyPath="yes" />
+                </Component>
+
+                <Component Id="License" Guid="{9D027AD9-FB3C-446F-9EC8-D968153E9619}">
+                    <File Id="LicenseFile" Source="$(var.LicenseFile)" KeyPath="yes" />
+                </Component>
+
+                <Component Id="Readme" Guid="{123955E0-32C7-4365-A73C-73D1F71227FB}">
+                    <File Id="ReadmeFile" Source="$(var.ReadmeFile)" KeyPath="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Id="StartMenuDir" Name="$(var.AppName)">
+                <Component Id="ApplicationShortcut" Guid="{A03840C8-B49D-430D-97EC-FA56A659BE99}">
+                    <Shortcut Id="ApplicationStartMenuShortcut"
+                        Name="!(loc.ApplicationName)"
+                        Description="$(var.AppDes)"
+                        Target="[!ExeFile]"
+                        WorkingDirectory="APPINSTALLFOLDER" />
+                    <RegistryValue Root="HKLM" Key="Software\litmon-q05" Name="installed"
+                        Type="integer" Value="1" KeyPath="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="DesktopFolder">
+            <Component Id="ApplicationShortcutDesktop" Guid="{74C04E10-8643-43DB-9FF7-297476E28414}">
+                <Shortcut Id="ApplicationDesktopShortcut"
+                    Name="!(loc.ApplicationName)"
+                    Description="$(var.AppDes)"
+                    Target="[!ExeFile]"
+                    WorkingDirectory="APPINSTALLFOLDER" />
+                <RegistryValue Root="HKLM" Key="Software\litmon-q05" Name="desktopShortcut"
+                    Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </StandardDirectory>
+
+        <ComponentGroup Id="Directories">
+            <ComponentRef Id="binary" />
+            <ComponentRef Id="License" />
+            <ComponentRef Id="Readme" />
+            <ComponentRef Id="ApplicationShortcut" />
+            <ComponentRef Id="ApplicationShortcutDesktop" />
+        </ComponentGroup>
+    </Fragment>
+</Wix>

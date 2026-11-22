@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v"
+        required: true
+        default: "1.0.0"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2 || dotnet tool update --global wix --version 6.0.2
+          $tools = "$env:USERPROFILE/.dotnet/tools"
+          $env:PATH = "$tools;$env:PATH"
+          $tools | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          wix extension add -g WixToolset.UI.wixext/6.0.2
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $tagVersion = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { "${{ inputs.version }}" }
+          if ($tagVersion -and $tagVersion -ne $version) {
+            throw "Release version $tagVersion does not match Cargo.toml version $version"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "version=$version"
+
+      - name: Build app
+        shell: pwsh
+        run: cargo build --release -p q05-app --target ${{ matrix.target }}
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $name = "litmon-q05-$env:VERSION-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/litmon-q05.exe" "dist/$name/"
+          Copy-Item LICENSE, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+
+      - name: Build MSI
+        shell: pwsh
+        env:
+          Q05_ARCH: ${{ matrix.arch }}
+          Q05_VERSION: ${{ env.VERSION }}
+          Q05_EXE: ${{ github.workspace }}\target\${{ matrix.target }}\release\litmon-q05.exe
+        run: cargo run --release -p wix-package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: litmon-q05-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.msi
+
+  release:
+    name: publish-release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', inputs.version) }}
+          name: litmon-q05 ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

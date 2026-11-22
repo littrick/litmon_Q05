@@ -2,3 +2,5 @@
 
 # 本地测试产物
 /tone_capture.wav
+/dist
+/wix-package/wix/var.wxi
