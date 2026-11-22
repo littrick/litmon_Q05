@@ -2,6 +2,7 @@
 name = "q05-video"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Q0.5 UVC 视频采集（Media Foundation）"
 
 [dependencies]

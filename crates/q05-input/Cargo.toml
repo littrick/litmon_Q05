@@ -2,6 +2,7 @@
 name = "q05-input"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Q0.5 输入状态机、HID usage/坐标映射"
 
 [dependencies]

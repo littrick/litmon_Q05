@@ -2,6 +2,7 @@
 name = "q05-proto"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Oray Q0.5 输入 HID 私有协议编解码（413D:2107）"
 
 [dependencies]
