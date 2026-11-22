@@ -5,18 +5,121 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version without leading v"
+      bump_type:
+        description: "Version bump type"
         required: true
-        default: "1.0.0"
+        default: patch
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      version:
+        description: "Specific version without leading v (overrides bump_type)"
+        required: false
+        default: ""
         type: string
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: prepare-version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        if: github.event_name == 'workflow_dispatch'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo install cargo-edit --locked
+
+      - name: Determine and bump version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          BUMP_TYPE: ${{ inputs.bump_type }}
+        run: |
+          set -euo pipefail
+
+          current=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          if ! echo "$current" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid current Cargo version: $current" >&2
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            version="${REF_NAME#v}"
+            if [ "$version" != "$current" ]; then
+              echo "Tag $REF_NAME does not match Cargo.toml version $current" >&2
+              exit 1
+            fi
+            sha="$GITHUB_SHA"
+          else
+            if [ -n "$INPUT_VERSION" ]; then
+              version=$(echo "$INPUT_VERSION" | tr -d '[:space:]')
+              if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "Invalid version input: $version" >&2
+                exit 1
+              fi
+            else
+              IFS=. read -r major minor patch <<< "$current"
+              case "$BUMP_TYPE" in
+                major) major=$((major + 1)); minor=0; patch=0 ;;
+                minor) minor=$((minor + 1)); patch=0 ;;
+                patch) patch=$((patch + 1)) ;;
+                *) echo "Invalid bump_type: $BUMP_TYPE" >&2; exit 1 ;;
+              esac
+              version="$major.$minor.$patch"
+            fi
+
+            if [ "$version" = "$current" ]; then
+              echo "New version must differ from current $current" >&2
+              exit 1
+            fi
+            lowest=$(printf '%s\n%s\n' "$current" "$version" | sort -V | head -n1)
+            if [ "$lowest" != "$current" ]; then
+              echo "New version $version must be greater than current $current" >&2
+              exit 1
+            fi
+
+            cargo set-version "$version"
+            cargo update --workspace
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml Cargo.lock
+            git commit -m "chore: bump version to $version"
+            git push origin "HEAD:$REF_NAME"
+            sha=$(git rev-parse HEAD)
+          fi
+
+          actual=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          if [ "$actual" != "$version" ]; then
+            echo "Cargo.toml version $actual != expected $version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version, commit: $sha"
+
   build:
     name: build-${{ matrix.arch }}
+    needs: prepare
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -28,6 +131,8 @@ jobs:
             target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,13 +151,13 @@ jobs:
           $tools | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           wix extension add -g WixToolset.UI.wixext/6.0.2
 
-      - name: Read version
+      - name: Read and validate version
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          $tagVersion = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { "${{ inputs.version }}" }
-          if ($tagVersion -and $tagVersion -ne $version) {
-            throw "Release version $tagVersion does not match Cargo.toml version $version"
+          $expected = "${{ needs.prepare.outputs.version }}"
+          if ($version -ne $expected) {
+            throw "Cargo.toml version $version does not match prepared version $expected"
           }
           "VERSION=$version" >> $env:GITHUB_ENV
           Write-Host "version=$version"
@@ -74,9 +179,18 @@ jobs:
         shell: pwsh
         env:
           Q05_ARCH: ${{ matrix.arch }}
-          Q05_VERSION: ${{ env.VERSION }}
+          Q05_VERSION: ${{ needs.prepare.outputs.version }}
           Q05_EXE: ${{ github.workspace }}\target\${{ matrix.target }}\release\litmon-q05.exe
         run: cargo run --release -p wix-package
+
+      - name: Validate build artifacts
+        shell: pwsh
+        run: |
+          $prefix = "litmon-q05-$env:VERSION-windows-${{ matrix.arch }}"
+          foreach ($file in @("dist/$prefix.zip", "dist/$prefix.msi")) {
+            if (-not (Test-Path $file)) { throw "Missing artifact: $file" }
+          }
+          Write-Host "Validated artifacts for $prefix"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -87,27 +201,44 @@ jobs:
 
   release:
     name: publish-release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
-      - name: Read version
-        id: version
+      - name: Validate release version
         shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          actual=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          test "$actual" = "$VERSION" || { echo "Cargo version $actual != $VERSION" >&2; exit 1; }
 
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Validate release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            for ext in zip msi; do
+              file="dist/litmon-q05-$VERSION-windows-$arch.$ext"
+              test -f "$file" || { echo "Missing release asset: $file" >&2; exit 1; }
+            done
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', inputs.version) }}
-          name: litmon-q05 ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: litmon-q05 ${{ needs.prepare.outputs.tag }}
           files: dist/*
           fail_on_unmatched_files: true
           generate_release_notes: true

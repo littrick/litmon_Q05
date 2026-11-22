@@ -32,6 +32,14 @@ cargo build --release -p q05-app
 | 左键/滚轮/键盘 | 窗口内透传给目标 |
 | 右键视频区域 | 透传给目标 |
 
+## 发布
+
+- 推送 `v<version>` tag：tag 必须与 `Cargo.toml` 版本一致；
+- 手动触发：选择 `major` / `minor` / `patch` 自动递增并提交 `Cargo.toml`，
+  或填写指定版本号；
+- CI 会校验 tag/输入版本、`Cargo.toml`、产物文件名一致；
+- 产物：`litmon-q05-<version>-windows-{x64,arm64}.zip/.msi`。
+
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
