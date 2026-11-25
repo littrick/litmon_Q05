@@ -40,6 +40,16 @@ pub struct Modifiers {
 }
 
 impl Modifiers {
+    /// 从 HID 修饰键位图还原。
+    pub fn from_hid_bits(bits: u8) -> Self {
+        Self {
+            control: bits & 0x01 != 0,
+            shift: bits & 0x02 != 0,
+            alt: bits & 0x04 != 0,
+            platform: bits & 0x08 != 0,
+        }
+    }
+
     /// 转成 HID 修饰键位图。
     pub fn hid_bits(self) -> u8 {
         let mut bits = 0;
@@ -523,6 +533,8 @@ mod tests {
         };
         assert_eq!(m.hid_bits(), 0x0F);
         assert_eq!(Modifiers::default().hid_bits(), 0);
+        assert_eq!(Modifiers::from_hid_bits(0x0F), m);
+        assert_eq!(Modifiers::from_hid_bits(0), Modifiers::default());
     }
 
     #[test]

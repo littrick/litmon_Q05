@@ -6,7 +6,9 @@
 //!   超过 6 个键排队等待空键槽；透传期间吞掉本地 Alt+F4 等默认处理。
 //! - 协议限制：键槽是 8-bit usage（媒体/浏览器扩展 usage 无法表示）、
 //!   固定 6 键槽；IME/非 US 布局组合字符无法通过 HID usage 还原。
-//! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；不做全局钩子。
+//! - 系统键：透传期间用 `WH_KEYBOARD_LL` 拦截 Win / PrintScreen / Alt+Tab /
+//!   Ctrl+Esc 等并转发，钩子仅在本窗口前台时生效；Ctrl+Alt+Del 无法拦截。
+//! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；钩子透传关闭时完全放行。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +32,25 @@ use q05_input::{
 };
 use q05_session::{AudioStatus, DevicePresence};
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent, VideoFormat};
+
+#[cfg(windows)]
+mod keyboard_hook;
+
+/// 低级钩子接管的系统键事件（Win / PrintScreen / Alt+Tab 等）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HookKeyEvent {
+    /// 钩子接管的修饰键位图（Win 键按下/抬起）。
+    Modifiers(u8),
+    /// 钩子接管的按键；`modifiers` 是 HID 修饰键位图。
+    Key {
+        /// HID usage。
+        usage: u8,
+        /// 是否按下。
+        pressed: bool,
+        /// 当前修饰键位图。
+        modifiers: u8,
+    },
+}
 
 const MOUSE_SEND_INTERVAL: Duration = Duration::from_millis(8);
 
@@ -142,6 +163,10 @@ struct VideoView {
     capslock: Option<bool>,
     /// 推断的目标端 CapsLock 状态；`None` 表示尚未建立基线。
     remote_capslock: Option<bool>,
+    /// 低级钩子是否生效（透传开启时由渲染刷新）。
+    hook_active: Arc<AtomicBool>,
+    /// Win 修饰键状态；由低级钩子维护，避免 GPUI 在 Win 被拦截后状态不一致。
+    win_pressed: bool,
     input_enabled: bool,
     input_requested: bool,
     last_mouse_send: Instant,
@@ -163,6 +188,8 @@ impl VideoView {
         presence_rx: Receiver<DevicePresence>,
         hid_rx: Receiver<Option<HidHandle>>,
         audio_rx: Receiver<AudioStatus>,
+        hook_rx: Receiver<HookKeyEvent>,
+        hook_active: Arc<AtomicBool>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -170,6 +197,21 @@ impl VideoView {
                 let alive = this
                     .update(cx, |view, cx| {
                         view.handle_event(event);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = hook_rx.recv().await {
+                let alive = this
+                    .update(cx, |view, cx| {
+                        view.handle_hook_event(event);
                         cx.notify();
                     })
                     .is_ok();
@@ -255,6 +297,8 @@ impl VideoView {
             mouse: MouseState::new(),
             capslock: None,
             remote_capslock: None,
+            hook_active,
+            win_pressed: false,
             input_enabled,
             input_requested: true,
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
@@ -432,6 +476,8 @@ impl VideoView {
         }
         let frame = self.mouse.release_buttons();
         self.send_frame(frame);
+        // 所有修饰键都已释放，Win 状态同步清零。
+        self.win_pressed = false;
     }
 
     /// 视频在窗口内的实际显示矩形。
@@ -489,12 +535,14 @@ impl VideoView {
             cx.notify();
             return;
         }
-        // F11 本地切换全屏，同时继续按普通按键透传给目标。
-        if event.keystroke.key.eq_ignore_ascii_case("f11") && !event.is_held {
+        // 透传开启时 F11 只发给目标，不触发本地全屏；
+        // 透传关闭时保留 F11 本地切换全屏的便利。
+        if !self.input_enabled && event.keystroke.key.eq_ignore_ascii_case("f11") && !event.is_held
+        {
             window.toggle_fullscreen();
             cx.notify();
         }
-        let modifiers = to_modifiers(&event.keystroke.modifiers);
+        let modifiers = self.with_win_override(to_modifiers(&event.keystroke.modifiers));
         // 安全开关：Ctrl+Alt+Q（忽略自动重复，避免按住时反复开关）。
         if modifiers.control
             && modifiers.alt
@@ -503,6 +551,7 @@ impl VideoView {
         {
             self.input_requested = !self.input_requested;
             self.input_enabled = self.input_requested && self.hid.is_some();
+            self.win_pressed = false;
             if self.input_enabled {
                 window.focus(&self.focus_handle, cx);
                 self.sync_capslock();
@@ -544,7 +593,7 @@ impl VideoView {
         }
         let modifiers = modifiers_for_key(
             &event.keystroke.key,
-            to_modifiers(&event.keystroke.modifiers),
+            self.with_win_override(to_modifiers(&event.keystroke.modifiers)),
         );
         if let Some((usage, _)) = key_to_usage(&event.keystroke.key) {
             if let Some(frame) = self.keyboard.key_up(usage, modifiers) {
@@ -563,7 +612,7 @@ impl VideoView {
     /// 这里把修饰键位图同步到目标，并根据 CapsLock 状态补一次切换。
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
         if self.input_enabled {
-            let modifiers = to_modifiers(&event.modifiers);
+            let modifiers = self.with_win_override(to_modifiers(&event.modifiers));
             if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
                 self.send_frame(frame);
             }
@@ -593,6 +642,53 @@ impl VideoView {
             self.send_frame(release);
             self.remote_capslock = Some(local);
         }
+    }
+
+    /// 处理低级钩子转发的系统键（Win / PrintScreen / Alt+Tab 等）。
+    fn handle_hook_event(&mut self, event: HookKeyEvent) {
+        if !self.input_enabled {
+            return;
+        }
+        match event {
+            HookKeyEvent::Modifiers(bits) => {
+                self.win_pressed = bits & 0x08 != 0;
+                if let Some(frame) = self
+                    .keyboard
+                    .modifiers_changed(Modifiers::from_hid_bits(bits))
+                {
+                    self.send_frame(frame);
+                }
+            }
+            HookKeyEvent::Key {
+                usage,
+                pressed,
+                modifiers,
+            } => {
+                let modifiers = Modifiers::from_hid_bits(modifiers);
+                self.win_pressed = modifiers.platform;
+                let frame = if pressed {
+                    self.keyboard.key_down(usage, modifiers)
+                } else {
+                    self.keyboard.key_up(usage, modifiers)
+                };
+                if let Some(frame) = frame {
+                    self.send_frame(frame);
+                }
+            }
+        }
+    }
+
+    /// GPUI 事件里的 Win 位不可靠（Win 键被低级钩子接管时不会到达 GPUI），
+    /// 统一用钩子维护的状态覆盖。
+    fn with_win_override(&self, modifiers: Modifiers) -> Modifiers {
+        // 钩子没装成功时 Win 键仍由 GPUI 正常上报，不能覆盖。
+        #[cfg(windows)]
+        if self.input_enabled && keyboard_hook::is_installed() {
+            let mut modifiers = modifiers;
+            modifiers.platform = self.win_pressed;
+            return modifiers;
+        }
+        modifiers
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &Window) {
@@ -899,6 +995,9 @@ impl Drop for VideoView {
 
 impl Render for VideoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 低级钩子只在输入透传开启时拦截系统键。
+        self.hook_active
+            .store(self.input_enabled, Ordering::Relaxed);
         for old in self.retired.drain(..) {
             cx.drop_image(old, Some(window));
         }
@@ -1164,6 +1263,15 @@ pub fn run(
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
     let quitting = Arc::new(AtomicBool::new(false));
+    // 低级钩子 → UI 的事件通道；只在 Windows 安装钩子，其他平台通道悬空。
+    #[cfg(windows)]
+    let (hook_tx, hook_rx) = async_channel::unbounded::<HookKeyEvent>();
+    #[cfg(not(windows))]
+    let (_hook_tx, hook_rx) = async_channel::unbounded::<HookKeyEvent>();
+    let hook_active = Arc::new(AtomicBool::new(false));
+    #[cfg(windows)]
+    let hook_active_for_hook = hook_active.clone();
+    let hook_active_for_view = hook_active.clone();
     application().run(move |cx: &mut App| {
         // 最后一个窗口关闭后退出，避免 GPUI 在无窗口状态下继续访问已销毁的 HWND。
         cx.on_window_closed(|cx, _window_id| {
@@ -1182,7 +1290,13 @@ pub fn run(
             },
             move |window, cx| {
                 #[cfg(windows)]
-                apply_window_icon(window);
+                {
+                    apply_window_icon(window);
+                    // 安装低级键盘钩子：透传期间拦截 Win/PrintScreen/Alt+Tab 等系统键。
+                    if let Some(hwnd) = window_hwnd(window) {
+                        keyboard_hook::install(hwnd, hook_tx, hook_active_for_hook);
+                    }
+                }
 
                 // 拦截系统关闭：直接 quit，阻止 GPUI 在窗口销毁后继续访问 HWND。
                 let quitting = quitting.clone();
@@ -1193,7 +1307,17 @@ pub fn run(
                     false
                 });
 
-                let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid_rx, audio_rx, cx));
+                let view = cx.new(|cx| {
+                    VideoView::new(
+                        rx,
+                        presence_rx,
+                        hid_rx,
+                        audio_rx,
+                        hook_rx,
+                        hook_active_for_view,
+                        cx,
+                    )
+                });
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
                     let subscription = cx.on_blur(&handle, window, |view, _window, cx| {
@@ -1268,6 +1392,19 @@ fn set_always_on_top(window: &Window, always_on_top: bool) {
 
 #[cfg(not(windows))]
 fn set_always_on_top(_window: &Window, _always_on_top: bool) {}
+
+/// 取当前 GPUI 窗口的 Win32 HWND。
+#[cfg(windows)]
+fn window_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use raw_window_handle::RawWindowHandle;
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(hwnd) = handle.as_raw() else {
+        return None;
+    };
+    Some(windows::Win32::Foundation::HWND(
+        hwnd.hwnd.get() as *mut core::ffi::c_void
+    ))
+}
 
 /// 显式设置窗口大/小图标，确保任务栏使用嵌入的 logo（资源 ID 1）。
 #[cfg(windows)]
