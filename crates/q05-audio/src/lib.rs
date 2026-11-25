@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::HeapRb;
@@ -40,6 +41,54 @@ pub enum AudioError {
 
 fn cpal_err(err: cpal::Error) -> AudioError {
     AudioError::Cpal(format!("{err}"))
+}
+
+/// xrun 日志限流间隔（秒）。
+const XRUN_LOG_INTERVAL_SECS: u64 = 10;
+
+/// 音频流错误日志。
+///
+/// WASAPI 的 `Xrun`（`DATA_DISCONTINUITY`）是设备/调度抖动造成的短暂断音，
+/// 流会自动继续，因此按可恢复问题处理并限流；其他错误仍然打 ERROR。
+struct StreamErrorLog {
+    last_xrun_secs: AtomicU64,
+}
+
+impl StreamErrorLog {
+    fn new() -> Self {
+        Self {
+            last_xrun_secs: AtomicU64::new(0),
+        }
+    }
+
+    fn log(&self, stream: &'static str, err: cpal::Error) {
+        if err.kind() == cpal::ErrorKind::Xrun {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let last = self.last_xrun_secs.load(Ordering::Relaxed);
+            let should_log = now.saturating_sub(last) >= XRUN_LOG_INTERVAL_SECS
+                && self
+                    .last_xrun_secs
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok();
+            if should_log {
+                tracing::warn!(
+                    stream,
+                    error = %err,
+                    "audio xrun (buffer discontinuity); stream continues"
+                );
+            }
+        } else {
+            tracing::error!(
+                stream,
+                error = %err,
+                kind = ?err.kind(),
+                "audio stream error"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +204,8 @@ impl AudioEngine {
         let (mut producer, mut consumer) = HeapRb::<f32>::new(buffer_samples).split();
 
         let capture_stats = stats.clone();
+        let input_error_log = Arc::new(StreamErrorLog::new());
+        let input_error_cb = input_error_log.clone();
         let input_stream = input_device
             .build_input_stream::<f32, _, _>(
                 input_config.config(),
@@ -167,13 +218,15 @@ impl AudioEngine {
                         capture_stats.overruns.fetch_add(1, Ordering::Relaxed);
                     }
                 },
-                |err| tracing::error!(error = %err, "audio input stream error"),
+                move |err| input_error_cb.log("input", err),
                 None,
             )
             .map_err(cpal_err)?;
 
         let output_stats = stats.clone();
         let output_mute = mute.clone();
+        let output_error_log = Arc::new(StreamErrorLog::new());
+        let output_error_cb = output_error_log.clone();
         let output_stream = output_device
             .build_output_stream::<f32, _, _>(
                 output_config.config(),
@@ -191,7 +244,7 @@ impl AudioEngine {
                         output_stats.underruns.fetch_add(1, Ordering::Relaxed);
                     }
                 },
-                |err| tracing::error!(error = %err, "audio output stream error"),
+                move |err| output_error_cb.log("output", err),
                 None,
             )
             .map_err(cpal_err)?;

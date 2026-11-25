@@ -6,7 +6,9 @@ license.workspace = true
 description = "Q0.5 UAC 音频采集与本地播放（WASAPI）"
 
 [dependencies]
-cpal = "0.18.2"
+# realtime：Windows 上把 WASAPI 音频线程提升到 MMCSS/实时优先级，
+# 降低 UI/解码抖动导致的 xrun（失败时 cpal 会回退到 TIME_CRITICAL）。
+cpal = { version = "0.18.2", features = ["realtime"] }
 ringbuf = "0.6.0"
 thiserror = "2.0.21"
 tracing = "0.1.44"
