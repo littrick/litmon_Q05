@@ -4,6 +4,11 @@
 //! - 键槽是 **HID usage**（0x04='a'，0x41=F8，Enter=0x28）；
 //! - 鼠标 x/y 的有效范围是 **0..32767（15-bit）**（16383/16384 ≈ 屏幕中心，32767 = 右下角）；
 //! - 修饰键位图是标准 HID 语义（0x01 LCTRL / 0x02 LSHIFT / 0x04 LALT / 0x08 LWIN）。
+//!
+//! 完整透传相关：
+//! - Windows 后端会把 `Shift+1` 转成 `"!"` 并清掉 shift 位，`key_to_usage` 负责标记需补 shift；
+//! - 报告只有 6 个键槽，超出的按键排队，空出键槽后由 `key_up` 的报告补上；
+//! - CapsLock 等切换键用 `KeyboardState::tap` 点按同步。
 
 use q05_proto::Frame;
 
@@ -103,6 +108,18 @@ pub fn hid_usage_for_key(key: &str) -> Option<u8> {
         "f10" => 0x43,
         "f11" => 0x44,
         "f12" => 0x45,
+        "f13" => 0x68,
+        "f14" => 0x69,
+        "f15" => 0x6A,
+        "f16" => 0x6B,
+        "f17" => 0x6C,
+        "f18" => 0x6D,
+        "f19" => 0x6E,
+        "f20" => 0x6F,
+        "f21" => 0x70,
+        "f22" => 0x71,
+        "f23" => 0x72,
+        "f24" => 0x73,
         "printscreen" | "print_screen" => 0x46,
         "scrolllock" | "scroll_lock" => 0x47,
         "pause" => 0x48,
@@ -145,6 +162,39 @@ pub fn hid_usage_for_key(key: &str) -> Option<u8> {
     Some(usage)
 }
 
+/// GPUI key 名 → `(HID usage, 是否需要 Shift)`。
+///
+/// Windows 后端会把 `Shift+1` 转换成 key `"!"` 并清掉 Shift 修饰位；
+/// 这里对需要 Shift 才能输入的符号返回 `true`，调用方需补回 Shift 位，
+/// 否则目标端会收到基础键（例如 `1` 而不是 `!`）。
+pub fn key_to_usage(key: &str) -> Option<(u8, bool)> {
+    let usage = hid_usage_for_key(key)?;
+    let needs_shift = matches!(
+        key.to_ascii_lowercase().as_str(),
+        "!" | "@"
+            | "#"
+            | "$"
+            | "%"
+            | "^"
+            | "&"
+            | "*"
+            | "("
+            | ")"
+            | "_"
+            | "+"
+            | "{"
+            | "}"
+            | "|"
+            | ":"
+            | "\""
+            | "~"
+            | "<"
+            | ">"
+            | "?"
+    );
+    Some((usage, needs_shift))
+}
+
 /// HID usage → 可读名称（HUD 显示用）。
 ///
 /// 未知 usage 返回 `0xNN`，保证任何输入都有可读文本。
@@ -174,6 +224,8 @@ pub fn hid_usage_label(usage: u8) -> String {
         0x39 => "CapsLock".to_string(),
         // F1..F12
         0x3A..=0x45 => format!("F{}", usage - 0x3A + 1),
+        // F13..F24
+        0x68..=0x73 => format!("F{}", usage - 0x68 + 13),
         0x46 => "PrintScreen".to_string(),
         0x47 => "ScrollLock".to_string(),
         0x48 => "Pause".to_string(),
@@ -262,7 +314,10 @@ pub fn normalize_position_in_rect(
     )
 }
 
-/// 键盘状态：最多 6 个同时按下的 HID usage + 修饰键位图。
+/// 键盘状态：按按下顺序保存所有 HID usage + 修饰键位图。
+///
+/// Q0.5 键盘报告只有 6 个键槽（HID boot keyboard）。同时按下的键超过 6 个时，
+/// 前 6 个出现在报告里，其余键排队；任一键抬起后，排队键自动补进空出的键槽。
 #[derive(Debug, Default, Clone)]
 pub struct KeyboardState {
     pressed: Vec<u8>,
@@ -303,12 +358,15 @@ impl KeyboardState {
             }
             return None;
         }
-        if self.pressed.len() >= 6 {
-            tracing::warn!("more than 6 keys pressed; dropping {usage:#04x}");
-            return None;
-        }
         self.pressed.push(usage);
         self.modifiers = bits;
+        if self.pressed.len() > 6 {
+            // 键槽已满：先排队，等有键抬起后由 key_up 的报告补上。
+            tracing::debug!(
+                pressed = self.pressed.len(),
+                "more than 6 keys pressed; queued {usage:#04x}"
+            );
+        }
         Some(self.frame())
     }
 
@@ -336,6 +394,22 @@ impl KeyboardState {
         }
         self.modifiers = bits;
         Some(self.frame())
+    }
+
+    /// 在当前按键状态上补一次“按下 + 抬起”（CapsLock 等切换键同步用）。
+    ///
+    /// 返回 `[按下帧, 恢复帧]`。按下帧把 `usage` 放在第一个键槽，
+    /// 保证已有 6 个键按下时也能发出。该键已在按下集合中时返回 `None`。
+    pub fn tap(&self, usage: u8) -> Option<[Frame; 2]> {
+        if self.pressed.contains(&usage) {
+            return None;
+        }
+        let mut keys = [0u8; 6];
+        keys[0] = usage;
+        for (dst, src) in keys.iter_mut().skip(1).zip(self.pressed.iter()) {
+            *dst = *src;
+        }
+        Some([Frame::keyboard(self.modifiers, keys), self.frame()])
     }
 
     /// 释放所有键并清空修饰键。
@@ -462,6 +536,8 @@ mod tests {
         assert_eq!(hid_usage_label(0x2C), "Space");
         assert_eq!(hid_usage_label(0x3A), "F1");
         assert_eq!(hid_usage_label(0x45), "F12");
+        assert_eq!(hid_usage_label(0x68), "F13");
+        assert_eq!(hid_usage_label(0x73), "F24");
         assert_eq!(hid_usage_label(0x4F), "Right");
         assert_eq!(hid_usage_label(0xE0), "LCtrl");
         // 未知 usage 退化为十六进制，仍可读。
@@ -548,13 +624,47 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_six_key_limit() {
+    fn keyboard_over_six_keys_are_queued() {
         let mut state = KeyboardState::new();
         for usage in 0x04..=0x09 {
             assert!(state.key_down(usage, Modifiers::default()).is_some());
         }
-        assert!(state.key_down(0x0A, Modifiers::default()).is_none());
-        assert_eq!(state.pressed().len(), 6);
+        // 第 7 个键先排队；仍有任一键抬起后自动补进键槽。
+        assert!(state.key_down(0x0A, Modifiers::default()).is_some());
+        assert_eq!(state.pressed(), &[0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]);
+        let frame = state.key_up(0x04, Modifiers::default()).unwrap();
+        assert_eq!(frame.payload, vec![0, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]);
+    }
+
+    #[test]
+    fn key_to_usage_marks_shifted_symbols() {
+        assert_eq!(key_to_usage("a"), Some((0x04, false)));
+        assert_eq!(key_to_usage("1"), Some((0x1E, false)));
+        assert_eq!(key_to_usage("!"), Some((0x1E, true)));
+        assert_eq!(key_to_usage("*"), Some((0x25, true)));
+        assert_eq!(key_to_usage("+"), Some((0x2E, true)));
+        assert_eq!(key_to_usage("-"), Some((0x2D, false)));
+        assert_eq!(key_to_usage("f13"), Some((0x68, false)));
+        assert_eq!(key_to_usage("f24"), Some((0x73, false)));
+        assert_eq!(key_to_usage("shift"), None);
+    }
+
+    #[test]
+    fn tap_sends_press_then_restore() {
+        let mut state = KeyboardState::new();
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert!(state.key_down(0x04, shift).is_some());
+        let [press, release] = state.tap(0x39).unwrap();
+        // 按下帧：CapsLock 占第一个键槽，已有键保留。
+        assert_eq!(press.payload, vec![0x02, 0x39, 0x04, 0, 0, 0, 0]);
+        // 恢复帧：回到按下前的状态。
+        assert_eq!(release.payload, vec![0x02, 0x04, 0, 0, 0, 0, 0]);
+        assert!(!state.pressed().contains(&0x39));
+        // 已在按下集合中的键不再重复点按。
+        assert!(state.tap(0x04).is_none());
     }
 
     #[test]

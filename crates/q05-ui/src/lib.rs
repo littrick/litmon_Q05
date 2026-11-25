@@ -2,6 +2,10 @@
 //!
 //! - 视频：MF 帧 → `RenderImage`；每帧必须 `cx.drop_image(old, Some(window))`。
 //! - 输入：窗口内键鼠/滚轮 → HID usage/归一化坐标 → `413D:2107`。
+//! - 完整透传：修饰键单独按放、CapsLock 切换、Shift 符号都会同步；
+//!   超过 6 个键排队等待空键槽；透传期间吞掉本地 Alt+F4 等默认处理。
+//! - 协议限制：键槽是 8-bit usage（媒体/浏览器扩展 usage 无法表示）、
+//!   固定 6 键槽；IME/非 US 布局组合字符无法通过 HID usage 还原。
 //! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；不做全局钩子。
 
 use std::sync::Arc;
@@ -13,16 +17,16 @@ use async_channel::Receiver;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, FocusHandle, ImageSource, IntoElement, KeyDownEvent,
-    KeyUpEvent, MouseButton as GpuiMouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Render, RenderImage, ScrollDelta, ScrollEvent, Subscription, Window, WindowBounds,
-    WindowOptions, div, img, px, size,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton as GpuiMouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, Render, RenderImage, ScrollDelta, ScrollEvent,
+    Subscription, Window, WindowBounds, WindowOptions, div, img, px, size,
 };
 use gpui_platform::application;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use q05_hid::HidHandle;
 use q05_input::{
-    KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
-    normalize_position_in_rect, pressed_keys_label,
+    KeyboardState, Modifiers, MouseButton, MouseState, key_to_usage, normalize_position_in_rect,
+    pressed_keys_label,
 };
 use q05_session::{AudioStatus, DevicePresence};
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent, VideoFormat};
@@ -134,6 +138,10 @@ struct VideoView {
     hid: Option<HidHandle>,
     keyboard: KeyboardState,
     mouse: MouseState,
+    /// 最近一次观察到的本地 CapsLock 状态；用于把切换同步到目标。
+    capslock: Option<bool>,
+    /// 推断的目标端 CapsLock 状态；`None` 表示尚未建立基线。
+    remote_capslock: Option<bool>,
     input_enabled: bool,
     input_requested: bool,
     last_mouse_send: Instant,
@@ -245,6 +253,8 @@ impl VideoView {
             hid: None,
             keyboard: KeyboardState::new(),
             mouse: MouseState::new(),
+            capslock: None,
+            remote_capslock: None,
             input_enabled,
             input_requested: true,
             last_mouse_send: Instant::now() - MOUSE_SEND_INTERVAL,
@@ -475,6 +485,7 @@ impl VideoView {
         // 菜单打开时 Esc 只关闭菜单，不透传给目标。
         if self.menu_open && event.keystroke.key.eq_ignore_ascii_case("escape") {
             self.menu_open = false;
+            cx.stop_propagation();
             cx.notify();
             return;
         }
@@ -484,12 +495,17 @@ impl VideoView {
             cx.notify();
         }
         let modifiers = to_modifiers(&event.keystroke.modifiers);
-        // 安全开关：Ctrl+Alt+Q。
-        if modifiers.control && modifiers.alt && event.keystroke.key.eq_ignore_ascii_case("q") {
+        // 安全开关：Ctrl+Alt+Q（忽略自动重复，避免按住时反复开关）。
+        if modifiers.control
+            && modifiers.alt
+            && !event.is_held
+            && event.keystroke.key.eq_ignore_ascii_case("q")
+        {
             self.input_requested = !self.input_requested;
             self.input_enabled = self.input_requested && self.hid.is_some();
             if self.input_enabled {
                 window.focus(&self.focus_handle, cx);
+                self.sync_capslock();
                 tracing::info!("input enabled");
             } else {
                 self.release_all();
@@ -497,12 +513,20 @@ impl VideoView {
             }
             // 开关输入会清空按键状态，刷新 HUD。
             cx.notify();
+            cx.stop_propagation();
             return;
         }
-        if !self.input_enabled || event.is_held {
+        if !self.input_enabled {
             return;
         }
-        if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
+        // 输入透传期间吞掉本地默认处理（Alt+F4 关窗、F10 菜单等）。
+        // 自动重复也在这里拦下：目标端由 HID 键盘状态自行产生重复。
+        cx.stop_propagation();
+        if event.is_held {
+            return;
+        }
+        let modifiers = modifiers_for_key(&event.keystroke.key, modifiers);
+        if let Some((usage, _)) = key_to_usage(&event.keystroke.key) {
             if let Some(frame) = self.keyboard.key_down(usage, modifiers) {
                 self.send_frame(frame);
                 // 按键状态变化后重绘，HUD 才能及时显示当前按下的键。
@@ -518,8 +542,11 @@ impl VideoView {
         if !self.input_enabled {
             return;
         }
-        let modifiers = to_modifiers(&event.keystroke.modifiers);
-        if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
+        let modifiers = modifiers_for_key(
+            &event.keystroke.key,
+            to_modifiers(&event.keystroke.modifiers),
+        );
+        if let Some((usage, _)) = key_to_usage(&event.keystroke.key) {
             if let Some(frame) = self.keyboard.key_up(usage, modifiers) {
                 self.send_frame(frame);
                 cx.notify();
@@ -527,6 +554,44 @@ impl VideoView {
         } else if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
             self.send_frame(frame);
             cx.notify();
+        }
+    }
+
+    /// 修饰键状态变化。
+    ///
+    /// Windows 后端不会为 Ctrl/Shift/Alt/Win 产生普通按键事件，只发这个事件；
+    /// 这里把修饰键位图同步到目标，并根据 CapsLock 状态补一次切换。
+    fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
+        if self.input_enabled {
+            let modifiers = to_modifiers(&event.modifiers);
+            if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
+                self.send_frame(frame);
+            }
+        }
+        self.capslock = Some(event.capslock.on);
+        self.sync_capslock();
+        cx.notify();
+    }
+
+    /// 让目标端 CapsLock 跟随本地状态；仅在输入开启时发送。
+    ///
+    /// 目标端 Lock 状态无法查询，因此第一次观察到本地状态时只建立基线，
+    /// 之后每次本地切换补一次点按，避免启动时凭空翻转目标端状态。
+    fn sync_capslock(&mut self) {
+        let Some(local) = self.capslock else {
+            return;
+        };
+        let Some(remote) = self.remote_capslock else {
+            self.remote_capslock = Some(local);
+            return;
+        };
+        if !self.input_enabled || local == remote {
+            return;
+        }
+        if let Some([press, release]) = self.keyboard.tap(0x39) {
+            self.send_frame(press);
+            self.send_frame(release);
+            self.remote_capslock = Some(local);
         }
     }
 
@@ -873,6 +938,11 @@ impl Render for VideoView {
             .on_key_up(
                 cx.listener(|view, event: &KeyUpEvent, _window, cx| view.on_key_up(event, cx)),
             )
+            .on_modifiers_changed(cx.listener(
+                |view, event: &ModifiersChangedEvent, _window, cx| {
+                    view.on_modifiers_changed(event, cx)
+                },
+            ))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, _cx| {
                 view.on_mouse_move(event, window)
             }))
@@ -1063,6 +1133,14 @@ fn to_modifiers(modifiers: &gpui::Modifiers) -> Modifiers {
         shift: modifiers.shift,
         platform: modifiers.platform,
     }
+}
+
+/// 补回 GPUI 转换 `Shift+数字/符号` 时清掉的 Shift 位。
+fn modifiers_for_key(key: &str, mut modifiers: Modifiers) -> Modifiers {
+    if key_to_usage(key).is_some_and(|(_, needs_shift)| needs_shift) {
+        modifiers.shift = true;
+    }
+    modifiers
 }
 
 fn to_mouse_button(button: GpuiMouseButton) -> Option<MouseButton> {
@@ -1290,6 +1368,24 @@ mod tests {
     fn topmost_label_shows_next_action() {
         assert_eq!(topmost_label(false), "置顶");
         assert_eq!(topmost_label(true), "取消置顶");
+    }
+
+    #[test]
+    fn shifted_symbols_restore_shift_bit() {
+        let none = Modifiers::default();
+        // GPUI 会把 Shift+1 等转成符号并清掉 shift，这里必须补回。
+        assert!(modifiers_for_key("!", none).shift);
+        assert!(modifiers_for_key("*", none).shift);
+        assert!(modifiers_for_key("?", none).shift);
+        assert!(!modifiers_for_key("1", none).shift);
+        assert!(!modifiers_for_key("a", none).shift);
+        assert!(!modifiers_for_key("f13", none).shift);
+        // 原本按着 Shift 的字母保持原样。
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert!(modifiers_for_key("a", shift).shift);
     }
 
     #[test]
