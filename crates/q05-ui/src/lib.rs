@@ -22,7 +22,7 @@ use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use q05_hid::HidHandle;
 use q05_input::{
     KeyboardState, Modifiers, MouseButton, MouseState, hid_usage_for_key,
-    normalize_position_in_rect,
+    normalize_position_in_rect, pressed_keys_label,
 };
 use q05_session::{AudioStatus, DevicePresence};
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent, VideoFormat};
@@ -495,6 +495,8 @@ impl VideoView {
                 self.release_all();
                 tracing::info!("input disabled");
             }
+            // 开关输入会清空按键状态，刷新 HUD。
+            cx.notify();
             return;
         }
         if !self.input_enabled || event.is_held {
@@ -503,13 +505,16 @@ impl VideoView {
         if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
             if let Some(frame) = self.keyboard.key_down(usage, modifiers) {
                 self.send_frame(frame);
+                // 按键状态变化后重绘，HUD 才能及时显示当前按下的键。
+                cx.notify();
             }
         } else if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
             self.send_frame(frame);
+            cx.notify();
         }
     }
 
-    fn on_key_up(&mut self, event: &KeyUpEvent) {
+    fn on_key_up(&mut self, event: &KeyUpEvent, cx: &mut Context<Self>) {
         if !self.input_enabled {
             return;
         }
@@ -517,9 +522,11 @@ impl VideoView {
         if let Some(usage) = hid_usage_for_key(&event.keystroke.key) {
             if let Some(frame) = self.keyboard.key_up(usage, modifiers) {
                 self.send_frame(frame);
+                cx.notify();
             }
         } else if let Some(frame) = self.keyboard.modifiers_changed(modifiers) {
             self.send_frame(frame);
+            cx.notify();
         }
     }
 
@@ -652,6 +659,11 @@ impl VideoView {
             AudioStatus::Starting => "音频启动中…",
             AudioStatus::Running => "音频已连接",
         };
+        // 当前正在按下（并已透传）的键盘按键，例如 `Ctrl+Alt+A`。
+        let keys = match pressed_keys_label(self.keyboard.modifiers(), self.keyboard.pressed()) {
+            Some(label) => format!("按键：{label}"),
+            None => "按键：无".to_string(),
+        };
         let mut hud = div()
             .id("status-hud")
             .absolute()
@@ -667,6 +679,7 @@ impl VideoView {
             .child(device)
             .child(video)
             .child(audio)
+            .child(keys)
             .child("右键打开菜单")
             .on_mouse_down(
                 GpuiMouseButton::Right,
@@ -857,7 +870,9 @@ impl Render for VideoView {
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 view.on_key_down(event, window, cx)
             }))
-            .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| view.on_key_up(event)))
+            .on_key_up(
+                cx.listener(|view, event: &KeyUpEvent, _window, cx| view.on_key_up(event, cx)),
+            )
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, _cx| {
                 view.on_mouse_move(event, window)
             }))
@@ -1103,9 +1118,11 @@ pub fn run(
                 let view = cx.new(|cx| VideoView::new(rx, presence_rx, hid_rx, audio_rx, cx));
                 let handle = view.read(cx).focus_handle.clone();
                 view.update(cx, |view, cx| {
-                    let subscription = cx.on_blur(&handle, window, |view, _window, _cx| {
+                    let subscription = cx.on_blur(&handle, window, |view, _window, cx| {
                         view.menu_open = false;
                         view.release_all();
+                        // 失焦会释放所有键，同步刷新 HUD 的按键显示。
+                        cx.notify();
                     });
                     view.subscriptions.push(subscription);
                 });

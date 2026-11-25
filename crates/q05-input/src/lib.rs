@@ -145,6 +145,89 @@ pub fn hid_usage_for_key(key: &str) -> Option<u8> {
     Some(usage)
 }
 
+/// HID usage → 可读名称（HUD 显示用）。
+///
+/// 未知 usage 返回 `0xNN`，保证任何输入都有可读文本。
+pub fn hid_usage_label(usage: u8) -> String {
+    match usage {
+        // 字母 a..z → A..Z
+        0x04..=0x1D => ((b'A' + (usage - 0x04)) as char).to_string(),
+        // 数字 1..9、0
+        0x1E..=0x26 => (usage - 0x1E + 1).to_string(),
+        0x27 => "0".to_string(),
+        0x28 => "Enter".to_string(),
+        0x29 => "Esc".to_string(),
+        0x2A => "Backspace".to_string(),
+        0x2B => "Tab".to_string(),
+        0x2C => "Space".to_string(),
+        0x2D => "-".to_string(),
+        0x2E => "=".to_string(),
+        0x2F => "[".to_string(),
+        0x30 => "]".to_string(),
+        0x31 => "\\".to_string(),
+        0x33 => ";".to_string(),
+        0x34 => "'".to_string(),
+        0x35 => "`".to_string(),
+        0x36 => ",".to_string(),
+        0x37 => ".".to_string(),
+        0x38 => "/".to_string(),
+        0x39 => "CapsLock".to_string(),
+        // F1..F12
+        0x3A..=0x45 => format!("F{}", usage - 0x3A + 1),
+        0x46 => "PrintScreen".to_string(),
+        0x47 => "ScrollLock".to_string(),
+        0x48 => "Pause".to_string(),
+        0x49 => "Insert".to_string(),
+        0x4A => "Home".to_string(),
+        0x4B => "PageUp".to_string(),
+        0x4C => "Delete".to_string(),
+        0x4D => "End".to_string(),
+        0x4E => "PageDown".to_string(),
+        0x4F => "Right".to_string(),
+        0x50 => "Left".to_string(),
+        0x51 => "Down".to_string(),
+        0x52 => "Up".to_string(),
+        0x53 => "NumLock".to_string(),
+        0x65 => "Menu".to_string(),
+        // 修饰键 usage（KeyboardState 不存储，但保留映射便于调试）。
+        0xE0 => "LCtrl".to_string(),
+        0xE1 => "LShift".to_string(),
+        0xE2 => "LAlt".to_string(),
+        0xE3 => "LWin".to_string(),
+        0xE4 => "RCtrl".to_string(),
+        0xE5 => "RShift".to_string(),
+        0xE6 => "RAlt".to_string(),
+        0xE7 => "RWin".to_string(),
+        _ => format!("0x{usage:02X}"),
+    }
+}
+
+/// 当前按下键的显示文本（HUD 用）。
+///
+/// 修饰键按 Ctrl、Alt、Shift、Win 的顺序，普通键按按下顺序，统一用 `+` 连接；
+/// 没有任何按键时返回 `None`。
+pub fn pressed_keys_label(modifiers: u8, pressed: &[u8]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if modifiers & 0x01 != 0 {
+        parts.push("Ctrl".to_string());
+    }
+    if modifiers & 0x04 != 0 {
+        parts.push("Alt".to_string());
+    }
+    if modifiers & 0x02 != 0 {
+        parts.push("Shift".to_string());
+    }
+    if modifiers & 0x08 != 0 {
+        parts.push("Win".to_string());
+    }
+    parts.extend(pressed.iter().map(|&usage| hid_usage_label(usage)));
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("+"))
+    }
+}
+
 /// 把窗口内坐标转成 Q0.5 的 0..32767 归一化坐标（内容区从 0,0 开始）。
 pub fn normalize_position(x: f32, y: f32, width: f32, height: f32) -> (u16, u16) {
     normalize_position_in_rect(x, y, 0.0, 0.0, width, height)
@@ -366,6 +449,38 @@ mod tests {
         };
         assert_eq!(m.hid_bits(), 0x0F);
         assert_eq!(Modifiers::default().hid_bits(), 0);
+    }
+
+    #[test]
+    fn usage_labels_cover_common_keys() {
+        assert_eq!(hid_usage_label(0x04), "A");
+        assert_eq!(hid_usage_label(0x1D), "Z");
+        assert_eq!(hid_usage_label(0x1E), "1");
+        assert_eq!(hid_usage_label(0x27), "0");
+        assert_eq!(hid_usage_label(0x28), "Enter");
+        assert_eq!(hid_usage_label(0x29), "Esc");
+        assert_eq!(hid_usage_label(0x2C), "Space");
+        assert_eq!(hid_usage_label(0x3A), "F1");
+        assert_eq!(hid_usage_label(0x45), "F12");
+        assert_eq!(hid_usage_label(0x4F), "Right");
+        assert_eq!(hid_usage_label(0xE0), "LCtrl");
+        // 未知 usage 退化为十六进制，仍可读。
+        assert_eq!(hid_usage_label(0xAA), "0xAA");
+    }
+
+    #[test]
+    fn pressed_keys_label_orders_modifiers_and_keys() {
+        // 无按键：不显示。
+        assert_eq!(pressed_keys_label(0, &[]), None);
+        // 单键。
+        assert_eq!(pressed_keys_label(0, &[0x04]), Some("A".to_string()));
+        // 修饰键按 Ctrl、Alt、Shift、Win 排序，普通键保持按下顺序。
+        assert_eq!(
+            pressed_keys_label(0x0F, &[0x05, 0x06]),
+            Some("Ctrl+Alt+Shift+Win+B+C".to_string())
+        );
+        // 只有修饰键。
+        assert_eq!(pressed_keys_label(0x01, &[]), Some("Ctrl".to_string()));
     }
 
     #[test]
