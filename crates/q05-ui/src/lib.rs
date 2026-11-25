@@ -7,7 +7,8 @@
 //! - 协议限制：键槽是 8-bit usage（媒体/浏览器扩展 usage 无法表示）、
 //!   固定 6 键槽；IME/非 US 布局组合字符无法通过 HID usage 还原。
 //! - 系统键：透传期间用 `WH_KEYBOARD_LL` 拦截 Win / PrintScreen / Alt+Tab /
-//!   Ctrl+Esc 等并转发，钩子仅在本窗口前台时生效；Ctrl+Alt+Del 无法拦截。
+//!   Ctrl+Esc 等并转发，钩子仅在本窗口前台时生效；Win+L / Ctrl+Alt+Del 无法拦截，
+//!   按下 Win+L 本机会照常锁屏。
 //! - 安全：Ctrl+Alt+Q 开关；失焦/退出 release-all；钩子透传关闭时完全放行。
 
 use std::sync::Arc;
@@ -83,14 +84,20 @@ const HUD_RADIUS: f32 = 4.0;
 const MENU_FONT_SIZE: f32 = 10.0;
 /// 菜单文字行高系数。
 const MENU_LINE_HEIGHT_FACTOR: f32 = 2.3;
-/// 菜单宽度系数。
-const MENU_LINE_WIDTH_FACTOR: f32 = 8.0;
+/// 菜单宽度系数；需要容纳“发送 Ctrl+Alt+Del”这类较长文案。
+const MENU_LINE_WIDTH_FACTOR: f32 = 14.0;
 /// 单个菜单项的行高（逻辑像素）。
 const MENU_LINE_HEIGHT: f32 = MENU_FONT_SIZE * MENU_LINE_HEIGHT_FACTOR;
 /// 右键菜单宽度（逻辑像素，由字号推导）。
 const MENU_WIDTH: f32 = MENU_FONT_SIZE * MENU_LINE_WIDTH_FACTOR;
 /// 菜单内边距（上下左右，逻辑像素）。
 const MENU_PADDING: f32 = 0.0;
+/// 菜单分隔线高度（逻辑像素）。
+const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
+/// 菜单分隔线上下留白（逻辑像素）。
+const MENU_SEPARATOR_GAP: f32 = 6.0;
+/// 一条分隔线（含上下留白）的总高度。
+const MENU_SEPARATOR_TOTAL: f32 = MENU_SEPARATOR_HEIGHT + MENU_SEPARATOR_GAP * 2.0;
 /// 菜单距窗口边缘的最小距离（逻辑像素）。
 const MENU_MARGIN: f32 = 8.0;
 
@@ -137,9 +144,6 @@ struct VideoView {
     frames: u64,
     last_report: Instant,
     last_frames: u64,
-    latency_sum: Duration,
-    latency_count: u64,
-    latency_max: Duration,
     /// 最近一秒统计到的帧率。
     fps: f64,
     /// 已透传的坐标移动事件数。
@@ -279,9 +283,6 @@ impl VideoView {
             frames: 0,
             last_report: Instant::now(),
             last_frames: 0,
-            latency_sum: Duration::ZERO,
-            latency_count: 0,
-            latency_max: Duration::ZERO,
             fps: 0.0,
             move_passthroughs: 0,
             left_passthroughs: 0,
@@ -400,9 +401,6 @@ impl VideoView {
     fn set_frame(&mut self, frame: Frame) {
         let now = Instant::now();
         let latency = now.saturating_duration_since(frame.captured_at);
-        self.latency_sum += latency;
-        self.latency_count += 1;
-        self.latency_max = self.latency_max.max(latency);
 
         let buffer =
             ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(frame.width, frame.height, frame.bgra)
@@ -428,39 +426,16 @@ impl VideoView {
         );
     }
 
+    /// 每秒刷新一次 HUD 用的帧率；不写控制台日志。
     fn report(&mut self) {
         let now = Instant::now();
         if now.duration_since(self.last_report) < Duration::from_secs(1) {
             return;
         }
         let dt = now.duration_since(self.last_report).as_secs_f64();
-        let fps = (self.frames - self.last_frames) as f64 / dt;
-        self.fps = fps;
-        let avg_latency = if self.latency_count > 0 {
-            self.latency_sum.as_secs_f64() * 1000.0 / self.latency_count as f64
-        } else {
-            0.0
-        };
-        let hid = self.hid.as_ref().map(HidHandle::stats).unwrap_or_default();
-        tracing::info!(
-            fps,
-            frames = self.frames,
-            avg_latency_ms = avg_latency,
-            max_latency_ms = self.latency_max.as_secs_f64() * 1000.0,
-            width = self.width,
-            height = self.height,
-            input_enabled = self.input_enabled,
-            screen_state = ?self.screen_state,
-            hid_sent = hid.sent,
-            hid_acks = hid.acks,
-            hid_heartbeats = hid.heartbeats,
-            "ui stats"
-        );
+        self.fps = (self.frames - self.last_frames) as f64 / dt;
         self.last_report = now;
         self.last_frames = self.frames;
-        self.latency_sum = Duration::ZERO;
-        self.latency_count = 0;
-        self.latency_max = Duration::ZERO;
     }
 
     fn send_frame(&self, frame: q05_hid::InputFrame) {
@@ -678,6 +653,25 @@ impl VideoView {
         }
     }
 
+    /// 向目标显式发送一个组合键（用于本机无法拦截的 `Ctrl+Alt+Del`、`Win+L` 等）。
+    ///
+    /// 不要求透传处于开启状态：这是用户主动选择的菜单动作；没有 HID 时静默忽略。
+    fn send_shortcut(&mut self, usage: u8, modifiers: Modifiers) {
+        if self.hid.is_none() {
+            tracing::warn!("shortcut ignored: input HID not ready");
+            return;
+        }
+        if let Some([press, release]) = self.keyboard.tap_with_modifiers(usage, modifiers) {
+            self.send_frame(press);
+            self.send_frame(release);
+            tracing::info!(
+                usage,
+                modifiers = modifiers.hid_bits(),
+                "shortcut sent to target"
+            );
+        }
+    }
+
     /// GPUI 事件里的 Win 位不可靠（Win 键被低级钩子接管时不会到达 GPUI），
     /// 统一用钩子维护的状态覆盖。
     fn with_win_override(&self, modifiers: Modifiers) -> Modifiers {
@@ -880,9 +874,24 @@ impl VideoView {
             .into_any_element()
     }
 
+    /// 菜单分隔线。
+    fn menu_separator() -> AnyElement {
+        div()
+            .py(px(MENU_SEPARATOR_GAP))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(MENU_SEPARATOR_HEIGHT))
+                    .bg(gpui::rgb(0x4A4A4A)),
+            )
+            .into_any_element()
+    }
+
     /// 右键下拉菜单。
     ///
-    /// 高度由实际菜单项数计算，增删菜单项不需要再同步常量。
+    /// 排序按使用频率与操作习惯分组：
+    /// 窗口/视图操作 → HUD 外观 → 本机无法拦截的组合键 → 关闭。
+    /// 高度由实际行数与分隔线计算，增删菜单项不需要再同步常量。
     fn render_menu(
         &self,
         viewport_w: f32,
@@ -891,7 +900,10 @@ impl VideoView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut items: Vec<AnyElement> = Vec::new();
-        // 常用窗口操作在前，HUD 设置次之，关闭放最后。
+        let mut action_count = 0usize;
+        let mut separator_count = 0usize;
+
+        // 1. 窗口/视图操作：最常用，放最前。
         items.push(Self::menu_item(
             if fullscreen { "退出全屏" } else { "全屏" },
             |_view, window, cx| {
@@ -900,6 +912,7 @@ impl VideoView {
             },
             cx,
         ));
+        action_count += 1;
         if self.width > 0 && self.height > 0 {
             items.push(Self::menu_item(
                 "自适应大小",
@@ -912,6 +925,7 @@ impl VideoView {
                 },
                 cx,
             ));
+            action_count += 1;
         }
         items.push(Self::menu_item(
             topmost_label(self.always_on_top),
@@ -922,6 +936,11 @@ impl VideoView {
             },
             cx,
         ));
+        action_count += 1;
+
+        // 2. HUD 外观设置。
+        items.push(Self::menu_separator());
+        separator_count += 1;
         items.push(Self::menu_item(
             &format!("HUD{}", self.hud_size.menu_label()),
             |view, _window, cx| {
@@ -930,6 +949,7 @@ impl VideoView {
             },
             cx,
         ));
+        action_count += 1;
         items.push(Self::menu_item(
             if self.hud_top_right {
                 "移到右下"
@@ -942,13 +962,56 @@ impl VideoView {
             },
             cx,
         ));
+        action_count += 1;
+
+        // 3. 本机无法拦截的组合键：通过菜单显式发给目标；没有输入 HID 时不显示。
+        if self.hid.is_some() {
+            items.push(Self::menu_separator());
+            separator_count += 1;
+            items.push(Self::menu_item(
+                "发送 Ctrl+Alt+Del",
+                |view, _window, cx| {
+                    view.send_shortcut(
+                        0x4C, // Delete
+                        Modifiers {
+                            control: true,
+                            alt: true,
+                            ..Default::default()
+                        },
+                    );
+                    cx.notify();
+                },
+                cx,
+            ));
+            action_count += 1;
+            items.push(Self::menu_item(
+                "发送 Win+L（锁屏）",
+                |view, _window, cx| {
+                    view.send_shortcut(
+                        0x0F, // L
+                        Modifiers {
+                            platform: true,
+                            ..Default::default()
+                        },
+                    );
+                    cx.notify();
+                },
+                cx,
+            ));
+            action_count += 1;
+        }
+
+        // 4. 破坏性操作单独成组，放在最后。
+        items.push(Self::menu_separator());
+        separator_count += 1;
         items.push(Self::menu_item(
             "关闭窗口",
             |_view, _window, cx| cx.defer(|cx| cx.quit()),
             cx,
         ));
+        action_count += 1;
 
-        let full_height = menu_height(items.len());
+        let full_height = menu_total_height(action_count, separator_count);
         let max_height = (viewport_h - MENU_MARGIN * 2.0).max(MENU_LINE_HEIGHT);
         let menu_height = full_height.min(max_height);
         let (x, y) = clamp_menu_pos(
@@ -1158,6 +1221,11 @@ fn video_content(rect: ContentRect, image: Arc<RenderImage>) -> AnyElement {
 /// 菜单总高度：所有菜单项行高 + 上下内边距。
 fn menu_height(item_count: usize) -> f32 {
     MENU_LINE_HEIGHT * item_count as f32 + MENU_PADDING * 2.0
+}
+
+/// 菜单总高度（含分隔线）：动作行 + 分隔线 + 上下内边距。
+fn menu_total_height(action_count: usize, separator_count: usize) -> f32 {
+    menu_height(action_count) + separator_count as f32 * MENU_SEPARATOR_TOTAL
 }
 
 /// 把菜单左上角限制在窗口内，保证整块菜单可见。
@@ -1553,6 +1621,17 @@ mod tests {
         assert_eq!(
             clamp_menu_pos(0.0, 0.0, 100.0, 100.0, two),
             (MENU_MARGIN, MENU_MARGIN)
+        );
+    }
+
+    #[test]
+    fn menu_height_accounts_for_separators() {
+        let expected = MENU_LINE_HEIGHT * 3.0 + MENU_PADDING * 2.0 + MENU_SEPARATOR_TOTAL * 2.0;
+        assert!(close(menu_total_height(3, 2), expected));
+        // 分隔线计入总高度，窗口较矮时仍能正确钳制。
+        assert_eq!(
+            clamp_menu_pos(0.0, 0.0, 300.0, 120.0, menu_total_height(3, 2)).1,
+            MENU_MARGIN
         );
     }
 

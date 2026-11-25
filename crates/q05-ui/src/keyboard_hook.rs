@@ -7,8 +7,9 @@
 //! - Alt+Tab / Alt+Esc（任务切换）；
 //! - Ctrl+Esc、Ctrl+Shift+Esc（开始菜单 / 任务管理器）。
 //!
-//! 普通键与 Ctrl/Shift/Alt 仍走 GPUI 事件路径；Ctrl+Alt+Del 是安全注意序列，
-//! 由系统直接处理，任何钩子都无法拦截。
+//! 普通键与 Ctrl/Shift/Alt 仍走 GPUI 事件路径。
+//! `Win+L` 由 Winlogon 处理、`Ctrl+Alt+Del` 是安全注意序列，用户态钩子都无法阻止
+//! 本机锁屏：按下 `Win+L` 时本机会照常锁定，且 `L` 未必会到达钩子（目标端也未必收到）。
 //!
 //! 钩子回调运行在安装线程（GPUI 主线程）上，只做按键判断与无阻塞发送，
 //! 具体状态更新与 HID 发送在 `VideoView` 的异步任务里完成。

@@ -411,6 +411,13 @@ impl KeyboardState {
     /// 返回 `[按下帧, 恢复帧]`。按下帧把 `usage` 放在第一个键槽，
     /// 保证已有 6 个键按下时也能发出。该键已在按下集合中时返回 `None`。
     pub fn tap(&self, usage: u8) -> Option<[Frame; 2]> {
+        self.tap_with_modifiers(usage, Modifiers::from_hid_bits(self.modifiers))
+    }
+
+    /// 用指定修饰键补一次“按下 + 抬起”（显式发送 `Ctrl+Alt+Del`、`Win+L` 等组合）。
+    ///
+    /// 返回 `[按下帧, 恢复帧]`；恢复帧回到当前真实按键状态，不保留临时修饰键。
+    pub fn tap_with_modifiers(&self, usage: u8, modifiers: Modifiers) -> Option<[Frame; 2]> {
         if self.pressed.contains(&usage) {
             return None;
         }
@@ -419,7 +426,7 @@ impl KeyboardState {
         for (dst, src) in keys.iter_mut().skip(1).zip(self.pressed.iter()) {
             *dst = *src;
         }
-        Some([Frame::keyboard(self.modifiers, keys), self.frame()])
+        Some([Frame::keyboard(modifiers.hid_bits(), keys), self.frame()])
     }
 
     /// 释放所有键并清空修饰键。
@@ -677,6 +684,28 @@ mod tests {
         assert!(!state.pressed().contains(&0x39));
         // 已在按下集合中的键不再重复点按。
         assert!(state.tap(0x04).is_none());
+    }
+
+    #[test]
+    fn tap_with_modifiers_sends_explicit_combo() {
+        let state = KeyboardState::new();
+        // Ctrl+Alt+Del。
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        let [press, release] = state.tap_with_modifiers(0x4C, ctrl_alt).unwrap();
+        assert_eq!(press.payload, vec![0x05, 0x4C, 0, 0, 0, 0, 0]);
+        assert_eq!(release.payload, vec![0; 7]);
+        // Win+L。
+        let win = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let [press, release] = state.tap_with_modifiers(0x0F, win).unwrap();
+        assert_eq!(press.payload, vec![0x08, 0x0F, 0, 0, 0, 0, 0]);
+        assert_eq!(release.payload, vec![0; 7]);
     }
 
     #[test]
