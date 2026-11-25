@@ -3868,7 +3868,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "q05-app"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3882,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "q05-audio"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "cpal",
  "ringbuf",
@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "q05-hid"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-channel",
  "hidapi",
@@ -3903,7 +3903,7 @@ dependencies = [
 
 [[package]]
 name = "q05-input"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "q05-proto",
  "tracing",
@@ -3911,11 +3911,11 @@ dependencies = [
 
 [[package]]
 name = "q05-proto"
-version = "1.0.1"
+version = "1.0.2"
 
 [[package]]
 name = "q05-session"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-channel",
  "q05-audio",
@@ -3928,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "q05-ui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "q05-video"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-channel",
  "thiserror 2.0.21",
@@ -6264,7 +6264,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wix-package"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "uuid",
 ]
