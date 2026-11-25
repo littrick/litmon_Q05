@@ -31,7 +31,7 @@ use q05_input::{
     KeyboardState, Modifiers, MouseButton, MouseState, key_to_usage, normalize_position_in_rect,
     pressed_keys_label,
 };
-use q05_session::{AudioStatus, DevicePresence};
+use q05_session::{AudioMute, AudioStatus, DevicePresence};
 use q05_video::{Frame, ScreenState, VideoError, VideoEvent, VideoFormat};
 
 #[cfg(windows)]
@@ -181,12 +181,15 @@ struct VideoView {
     presence_seen: bool,
     device_message: Option<String>,
     audio_status: AudioStatus,
+    /// 本地音频静音开关（与音频引擎共享）。
+    audio_mute: AudioMute,
     hud_size: HudSize,
     hud_top_right: bool,
     always_on_top: bool,
 }
 
 impl VideoView {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rx: Receiver<VideoEvent>,
         presence_rx: Receiver<DevicePresence>,
@@ -194,6 +197,7 @@ impl VideoView {
         audio_rx: Receiver<AudioStatus>,
         hook_rx: Receiver<HookKeyEvent>,
         hook_active: Arc<AtomicBool>,
+        audio_mute: AudioMute,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
@@ -310,6 +314,7 @@ impl VideoView {
             presence_seen: false,
             device_message: None,
             audio_status: AudioStatus::Stopped,
+            audio_mute,
             hud_size: HudSize::Small,
             hud_top_right: false,
             always_on_top: false,
@@ -814,6 +819,24 @@ impl VideoView {
             AudioStatus::Starting => "音频启动中…",
             AudioStatus::Running => "音频已连接",
         };
+        // 点击这一行切换本地静音；仅影响本机播放，不影响采集与反向控制。
+        let mute_line = div()
+            .id("hud-mute")
+            .cursor_pointer()
+            .rounded_sm()
+            // 可点击提示：悬停时高亮，和菜单项一致。
+            .hover(|style| style.bg(gpui::rgb(0x444444)))
+            .on_mouse_down(
+                GpuiMouseButton::Left,
+                cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
+                    let muted = view.audio_mute.toggle();
+                    tracing::info!(muted, "audio mute toggled");
+                    // 本机控制，不要把这次点击也透传给目标。
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(mute_hud_label(self.audio_mute.is_muted()));
         // 当前正在按下（并已透传）的键盘按键，例如 `Ctrl+Alt+A`。
         let keys = match pressed_keys_label(self.keyboard.modifiers(), self.keyboard.pressed()) {
             Some(label) => format!("按键：{label}"),
@@ -834,6 +857,7 @@ impl VideoView {
             .child(device)
             .child(video)
             .child(audio)
+            .child(mute_line)
             .child(keys)
             .child("右键打开菜单")
             .on_mouse_down(
@@ -938,7 +962,7 @@ impl VideoView {
         ));
         action_count += 1;
 
-        // 2. HUD 外观设置。
+        // 2. HUD 设置（外观 + 本地声音）。
         items.push(Self::menu_separator());
         separator_count += 1;
         items.push(Self::menu_item(
@@ -958,6 +982,16 @@ impl VideoView {
             },
             |view, _window, cx| {
                 view.hud_top_right = !view.hud_top_right;
+                cx.notify();
+            },
+            cx,
+        ));
+        action_count += 1;
+        items.push(Self::menu_item(
+            mute_menu_label(self.audio_mute.is_muted()),
+            |view, _window, cx| {
+                let muted = view.audio_mute.toggle();
+                tracing::info!(muted, "audio mute toggled");
                 cx.notify();
             },
             cx,
@@ -1327,6 +1361,7 @@ pub fn run(
     presence_rx: Receiver<DevicePresence>,
     hid_rx: Receiver<Option<HidHandle>>,
     audio_rx: Receiver<AudioStatus>,
+    audio_mute: AudioMute,
 ) -> Result<()> {
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let open_error_in = open_error.clone();
@@ -1383,6 +1418,7 @@ pub fn run(
                         audio_rx,
                         hook_rx,
                         hook_active_for_view,
+                        audio_mute,
                         cx,
                     )
                 });
@@ -1421,6 +1457,26 @@ fn topmost_label(always_on_top: bool) -> &'static str {
         "取消置顶"
     } else {
         "置顶"
+    }
+}
+
+/// HUD 静音行文案（显示当前状态 + 点击后的动作）。
+///
+/// 两个状态保持相同的全角字符数，避免切换时 HUD 宽度跳变。
+fn mute_hud_label(muted: bool) -> &'static str {
+    if muted {
+        "声音：静音（点击恢复）"
+    } else {
+        "声音：开启（点击静音）"
+    }
+}
+
+/// 菜单里的静音文案（显示点击后的动作）。
+fn mute_menu_label(muted: bool) -> &'static str {
+    if muted {
+        "取消静音"
+    } else {
+        "静音音频"
     }
 }
 
@@ -1573,6 +1629,19 @@ mod tests {
     fn topmost_label_shows_next_action() {
         assert_eq!(topmost_label(false), "置顶");
         assert_eq!(topmost_label(true), "取消置顶");
+    }
+
+    #[test]
+    fn mute_labels_show_state_and_next_action() {
+        assert_eq!(mute_hud_label(false), "声音：开启（点击静音）");
+        assert_eq!(mute_hud_label(true), "声音：静音（点击恢复）");
+        // 两个状态保持相同字符数，避免 HUD 宽度跳变。
+        assert_eq!(
+            mute_hud_label(false).chars().count(),
+            mute_hud_label(true).chars().count()
+        );
+        assert_eq!(mute_menu_label(false), "静音音频");
+        assert_eq!(mute_menu_label(true), "取消静音");
     }
 
     #[test]

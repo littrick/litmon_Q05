@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use async_channel::Sender;
-use q05_audio::AudioEngine;
+use q05_audio::{AudioEngine, AudioMute};
 use q05_hid::HidHandle;
 use q05_video::{VideoCapture, VideoEvent, VideoFormat};
 
@@ -40,12 +40,22 @@ impl MediaSupervisor {
         hid_tx: Sender<Option<HidHandle>>,
         presence_tx: Sender<DevicePresence>,
         audio_tx: Sender<AudioStatus>,
+        audio_mute: AudioMute,
     ) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let thread = thread::Builder::new()
             .name("q05-media".into())
-            .spawn(move || run(video_tx, hid_tx, presence_tx, audio_tx, stop_thread))?;
+            .spawn(move || {
+                run(
+                    video_tx,
+                    hid_tx,
+                    presence_tx,
+                    audio_tx,
+                    audio_mute,
+                    stop_thread,
+                )
+            })?;
         Ok(Self {
             stop,
             thread: Some(thread),
@@ -72,6 +82,7 @@ fn run(
     hid_tx: Sender<Option<HidHandle>>,
     presence_tx: Sender<DevicePresence>,
     audio_tx: Sender<AudioStatus>,
+    audio_mute: AudioMute,
     stop: Arc<AtomicBool>,
 ) {
     let (monitor_tx, monitor_rx) = async_channel::bounded(8);
@@ -170,7 +181,7 @@ fn run(
 
             if audio.is_none() {
                 let _ = audio_tx.try_send(AudioStatus::Starting);
-                match AudioWorker::start(audio_tx.clone()) {
+                match AudioWorker::start(audio_tx.clone(), audio_mute.clone()) {
                     Ok(worker) => audio = Some(worker),
                     Err(err) => {
                         let _ = audio_tx.try_send(AudioStatus::Stopped);
@@ -209,12 +220,12 @@ struct AudioWorker {
 }
 
 impl AudioWorker {
-    fn start(audio_tx: Sender<AudioStatus>) -> std::io::Result<Self> {
+    fn start(audio_tx: Sender<AudioStatus>, audio_mute: AudioMute) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let thread = thread::Builder::new()
             .name("q05-audio".into())
-            .spawn(move || match AudioEngine::start() {
+            .spawn(move || match AudioEngine::start(audio_mute) {
                 Ok(engine) => {
                     let _ = audio_tx.try_send(AudioStatus::Running);
                     tracing::info!("audio started");

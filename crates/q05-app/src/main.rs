@@ -30,11 +30,18 @@ fn main() -> Result<()> {
     let (hid_tx, hid_rx) = async_channel::bounded(8);
     let (presence_tx, presence_rx) = async_channel::bounded(8);
     let (audio_tx, audio_rx) = async_channel::bounded(8);
+    // UI 与音频引擎共享的本地静音开关。
+    let audio_mute = q05_session::AudioMute::new();
 
-    let mut supervisor =
-        q05_session::MediaSupervisor::start(video_tx, hid_tx, presence_tx, audio_tx)?;
+    let mut supervisor = q05_session::MediaSupervisor::start(
+        video_tx,
+        hid_tx,
+        presence_tx,
+        audio_tx,
+        audio_mute.clone(),
+    )?;
 
-    let result = q05_ui::run(video_rx, presence_rx, hid_rx, audio_rx);
+    let result = q05_ui::run(video_rx, presence_rx, hid_rx, audio_rx, audio_mute);
     supervisor.stop();
     result
 }

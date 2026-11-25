@@ -13,6 +13,7 @@ mod presence;
 pub use media::{AudioStatus, MediaSupervisor};
 #[cfg(windows)]
 pub use presence::{DeviceError, DeviceMonitor, DevicePresence, query_presence};
+pub use q05_audio::AudioMute;
 
 #[cfg(not(windows))]
 mod unsupported {

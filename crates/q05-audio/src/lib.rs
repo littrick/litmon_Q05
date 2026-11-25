@@ -8,7 +8,7 @@
 //! 2 声道、48kHz 的配置。暂不做重采样。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::HeapRb;
@@ -80,6 +80,37 @@ pub struct AudioConfigInfo {
     pub output_channels: u16,
 }
 
+/// 本地静音开关（可在 UI/音频线程间共享）。
+///
+/// 静音只影响本地播放，采集与 HID/视频链路不受影响；
+/// 关闭静音后不会补播静音期间的旧音频。
+#[derive(Clone, Debug, Default)]
+pub struct AudioMute(Arc<AtomicBool>);
+
+impl AudioMute {
+    /// 新建开关，默认不静音。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前是否静音。
+    pub fn is_muted(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 设置静音状态。
+    pub fn set_muted(&self, muted: bool) {
+        self.0.store(muted, Ordering::Relaxed);
+    }
+
+    /// 切换静音状态，返回切换后的值。
+    pub fn toggle(&self) -> bool {
+        let muted = !self.is_muted();
+        self.set_muted(muted);
+        muted
+    }
+}
+
 /// 音频播放引擎。
 ///
 /// 创建后立即开始采集与播放；drop 时停止。
@@ -92,7 +123,9 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     /// 打开 Q0.5 输入与默认输出，开始播放。
-    pub fn start() -> Result<Self, AudioError> {
+    ///
+    /// `mute` 控制本地输出；静音时仍然消费采集数据，避免恢复后补播旧音频。
+    pub fn start(mute: AudioMute) -> Result<Self, AudioError> {
         let host = cpal::default_host();
 
         let input_device = find_q05_input(&host)?;
@@ -140,11 +173,17 @@ impl AudioEngine {
             .map_err(cpal_err)?;
 
         let output_stats = stats.clone();
+        let output_mute = mute.clone();
         let output_stream = output_device
             .build_output_stream::<f32, _, _>(
                 output_config.config(),
                 move |data, _info| {
+                    // 静音时依旧消费采集数据，只把输出填成静音；
+                    // 这样恢复后不会播放积压的旧音频。
                     let read = consumer.pop_slice(data);
+                    if output_mute.is_muted() {
+                        data.fill(0.0);
+                    }
                     output_stats
                         .played
                         .fetch_add(read as u64, Ordering::Relaxed);
@@ -274,5 +313,16 @@ mod tests {
         let stats = AudioStatsSnapshot::default();
         assert_eq!(stats.captured_samples, 0);
         assert_eq!(stats.underruns, 0);
+    }
+
+    #[test]
+    fn mute_switch_toggles_and_is_shared() {
+        let mute = AudioMute::new();
+        assert!(!mute.is_muted());
+        let other = mute.clone();
+        assert!(other.toggle());
+        assert!(mute.is_muted());
+        other.set_muted(false);
+        assert!(!mute.is_muted());
     }
 }

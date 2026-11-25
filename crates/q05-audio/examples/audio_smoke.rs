@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let engine = q05_audio::AudioEngine::start()?;
+    let engine = q05_audio::AudioEngine::start(q05_audio::AudioMute::new())?;
     println!("config: {:?}", engine.config());
     for second in 1..=10 {
         thread::sleep(Duration::from_secs(1));
